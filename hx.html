@@ -956,13 +956,25 @@ class NativeConnection extends Events {
         this.pc.ontrack = e => { this.remoteAudio = new MediaStream([e.track]); this.emit('audio', this.remoteAudio); };
         this.pc.onconnectionstatechange = () => { if (this.pc.connectionState === 'failed' || this.pc.connectionState === 'closed')
             this.close(); };
+        // Keep the ICE state available to the caller.  In particular, a data
+        // channel can remain closed while the peer connection is still
+        // checking candidates; closing it on `disconnected` makes LAN joins
+        // fail during a short Wi-Fi handover.
+        this.pc.oniceconnectionstatechange = () => {
+            if (this.pc.iceConnectionState === 'failed' || this.pc.iceConnectionState === 'closed')
+                this.emit('icefailed', this.pc.iceConnectionState);
+        };
         this.pc.ondatachannel = e => this.bind(e.channel);
         if (initiate) {
             this.pc.addTransceiver('audio', { direction: 'sendrecv' });
             this.bind(this.pc.createDataChannel('renleisha', { ordered: true }));
             void this.pc.createOffer().then(async (offer) => {
                 await this.pc.setLocalDescription(offer);
-                owner.signal({ type: 'OFFER', dst: peer, payload: { connectionId, type: 'data', sdp: offer, metadata: { app: 'renleisha/2' } } });
+                owner.signal({ type: 'OFFER', dst: peer, payload: {
+                    connectionId, type: 'data', sdp: this.pc.localDescription ?? offer,
+                    label: 'renleisha', reliable: true, serialization: 'json',
+                    metadata: { app: 'renleisha/2' }
+                } });
             }).catch(e => this.fail(e));
         }
     }
@@ -1039,11 +1051,13 @@ class NativeConnection extends Events {
                 await this.pc.setRemoteDescription(m.payload.sdp);
                 if (m.type === 'OFFER') {
                     for (const t of this.pc.getTransceivers())
-                        if (t.receiver.track.kind === 'audio')
+                        if (t.receiver.track?.kind === 'audio')
                             t.direction = 'sendrecv';
                     const answer = await this.pc.createAnswer();
                     await this.pc.setLocalDescription(answer);
-                    this.owner.signal({ type: 'ANSWER', dst: this.peer, payload: { connectionId: this.connectionId, type: 'data', sdp: answer } });
+                    this.owner.signal({ type: 'ANSWER', dst: this.peer, payload: {
+                        connectionId: this.connectionId, type: 'data', sdp: this.pc.localDescription ?? answer
+                    } });
                 }
                 for (const c of this.candidates.splice(0))
                     await this.pc.addIceCandidate(c);
@@ -1063,6 +1077,7 @@ class NativePeer extends Events {
     ws = null;
     heartbeat = null;
     early = new Map();
+    signalQueue = [];
     connections = new Map();
     token = (0, types_js_1.randomId)();
     options;
@@ -1094,6 +1109,7 @@ class NativePeer extends Events {
                         this.heartbeat = setInterval(() => { if (ws.readyState === WebSocket.OPEN)
                             ws.send(JSON.stringify({ type: 'HEARTBEAT' })); }, 5000);
                         this.emit('open', this.id);
+                        this.flushSignals(ws);
                         return;
                     }
                     if (m.type === 'ID-TAKEN') {
@@ -1148,10 +1164,26 @@ class NativePeer extends Events {
             this.emit('error', e);
         }
     }
-    signal(m) { if (this.ws?.readyState === WebSocket.OPEN)
-        this.ws.send(JSON.stringify(m));
-    else
-        this.emit('error', Error('信令暂时断开，无法建立新连接。')); }
+    flushSignals(ws = this.ws) {
+        if (ws?.readyState !== WebSocket.OPEN)
+            return;
+        while (this.signalQueue.length)
+            ws.send(JSON.stringify(this.signalQueue.shift()));
+    }
+    signal(m) {
+        if (this.destroyed)
+            return;
+        if (this.ws?.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(m));
+            return;
+        }
+        // ICE trickle can race a reconnecting signaling socket. Keep a
+        // bounded queue instead of silently dropping a candidate.
+        if (this.signalQueue.length < 128)
+            this.signalQueue.push(m);
+        else
+            this.emit('error', Error('信令暂时断开，候选地址队列已满。'));
+    }
     connect(id, _options) {
         const c = new NativeConnection(id, 'rls-dc-' + (0, types_js_1.randomId)(), this, true);
         this.connections.set(id + ':' + c.connectionId, c);
@@ -1161,7 +1193,7 @@ class NativePeer extends Events {
     destroy() { if (this.destroyed)
         return; this.destroyed = true; if (this.heartbeat)
         clearInterval(this.heartbeat); for (const c of [...this.connections.values()])
-        c.close(); this.ws?.close(); this.ws = null; this.early.clear(); }
+        c.close(); this.ws?.close(); this.ws = null; this.early.clear(); this.signalQueue = []; }
 }
 exports.NativePeer = NativePeer;
 
@@ -1240,9 +1272,26 @@ function acceptPeer(peer, fn) {
 function connectPeer(peer, hostId) {
     return new Promise((res, rej) => {
         const c = peer.connect(hostId, { reliable: true, serialization: 'json' });
-        const timer = setTimeout(() => { c.close(); rej(Error('已连接信令，但未能连上房主的数据通道。请确认房主在线；受限网络可能需要 TURN。')); }, 20000);
-        c.on('open', () => { clearTimeout(timer); res(new PeerLink(c)); });
-        c.on('error', e => { clearTimeout(timer); rej(e instanceof Error ? e : Error('与房主建联失败。')); });
+        let settled = false;
+        const finishError = (error) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            c.close();
+            rej(error);
+        };
+        const timer = setTimeout(() => {
+            const state = c.pc?.iceConnectionState;
+            const detail = state === 'failed'
+                ? 'ICE 协商失败，请在联机设置中加入可用的 TURN 服务。'
+                : '已连接信令，但未能连上房主的数据通道。请确认房主在线；受限网络可能需要 TURN。';
+            finishError(Error(detail));
+        }, 20000);
+        c.on('open', () => { if (settled)
+            return; settled = true; clearTimeout(timer); res(new PeerLink(c)); });
+        c.on('error', e => finishError(e instanceof Error ? e : Error('与房主建联失败。')));
+        c.on('icefailed', () => finishError(Error('ICE 协商失败，请在联机设置中加入可用的 TURN 服务。')));
     });
 }
 function invitationURL(roomId, hostId, settings, base = location.href) {
@@ -1551,7 +1600,7 @@ class VoiceRoom {
             return;
         if (!ep.destination) {
             ep.destination = this.context.createMediaStreamDestination();
-            const t = ep.link.rtc?.getTransceivers().find(t => t.receiver.track.kind === 'audio');
+            const t = ep.link.rtc?.getTransceivers().find(t => t.receiver.track?.kind === 'audio');
             if (t)
                 void t.sender.replaceTrack(ep.destination.stream.getAudioTracks()[0]).catch(e => { this.state.error = '音频通道接入失败：' + message(e); this.changed(); });
         }
