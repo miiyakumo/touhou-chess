@@ -647,9 +647,23 @@ class ClientSession {
         this.error = '';
         this.replaced = false;
         this.seq = -1;
-        this.offs = [link.onMessage(x => this.receive(x)), link.onClose(() => { this.connected = false; this.error = '与房主的数据通道已断开。操作会在恢复后重新确认。'; this.publish(); })];
+        const sendPresence = () => {
+            if (this.link !== link || !link.open)
+                return;
+            try {
+                link.send({ protocol: types_js_1.PROTOCOL, type: 'presence', roomId: this.roomId,
+                    visible: typeof document === 'undefined' || document.visibilityState === 'visible' });
+            }
+            catch { /* the normal data-channel close path handles this */ }
+        };
+        const onVisibility = () => sendPresence();
+        this.offs = [link.onMessage(x => this.receive(x)), link.onClose(() => { this.connected = false; this.error = '与房主的数据通道已断开。操作会在恢复后重新确认。'; this.publish(); }), () => { if (typeof document !== 'undefined')
+            document.removeEventListener('visibilitychange', onVisibility); }];
+        if (typeof document !== 'undefined')
+            document.addEventListener('visibilitychange', onVisibility);
         link.send({ protocol: types_js_1.PROTOCOL, type: 'hello', roomId: this.roomId, token: this.token, name: this.name });
         this.lastPong = this.now();
+        sendPresence();
     }
     receive(raw) {
         try {
@@ -725,7 +739,14 @@ class ClientSession {
     heartbeat() {
         if (!this.link?.open)
             return;
-        if (this.now() - this.lastPong > 22000) {
+        // Treat a missed ping as a warning, not an immediate disconnect. While
+        // visible, confirm a dead channel within about 35s; when mobile Safari
+        // or Android suspends a background tab, allow two minutes before
+        // declaring it dead. This avoids both reconnect storms and very late
+        // detection after an active connection has actually disappeared.
+        const hidden = typeof document !== 'undefined' && document.visibilityState !== 'visible';
+        const timeout = hidden ? 120000 : 35000;
+        if (this.now() - this.lastPong > timeout) {
             this.link.close();
             return;
         }
@@ -763,7 +784,7 @@ class HostSession {
         this.off = authority.subscribe(() => this.broadcast());
     }
     accept(link) {
-        const c = { link, seat: null, token: null, lastSeen: this.now(), seq: 0, lastView: '', busy: false, closed: false };
+        const c = { link, seat: null, token: null, lastSeen: this.now(), visible: true, seq: 0, lastView: '', busy: false, closed: false };
         this.conns.set(link.id, c);
         link.onMessage(x => { void this.receive(c, x); });
         link.onClose(() => this.closed(c));
@@ -784,6 +805,12 @@ class HostSession {
             c.lastSeen = this.now();
             if (m.type === 'ping') {
                 this.send(c, { protocol: types_js_1.PROTOCOL, type: 'pong', sent: m.sent });
+                return;
+            }
+            if (m.type === 'presence') {
+                if (m.roomId !== this.authority.snapshot().id)
+                    throw new model_js_1.RuleError('WRONG_ROOM', '邀请链接属于其他房间。');
+                c.visible = m.visible;
                 return;
             }
             if (m.roomId !== this.authority.snapshot().id)
@@ -864,7 +891,7 @@ class HostSession {
         }
     }
     sweep() { for (const c of this.conns.values())
-        if (this.now() - c.lastSeen > (c.seat === null ? 12000 : 20000))
+        if (this.now() - c.lastSeen > (c.seat === null ? 30000 : c.visible ? 45000 : 120000))
             c.link.close(); }
     close() { this.off(); for (const c of [...this.conns.values()])
         c.link.close(); }
@@ -1121,7 +1148,7 @@ class NativePeer extends Events {
                         return;
                     }
                     if (m.type === 'EXPIRE') {
-                        this.emit('error', Error('未找到房主，请确认其在线并重新复制邀请码。'));
+                        this.emit('error', Error('房主的信令连接暂时不可达，可能正在重连。请等待几秒后再试；持续失败时检查房主页面、信令和 TURN 设置。'));
                         return;
                     }
                     if (!m.src || !m.payload?.connectionId)
@@ -1400,6 +1427,10 @@ function parseClientMessage(raw) {
         return { protocol: types_js_1.PROTOCOL, type: 'ping', sent: raw.sent };
     }
     (0, model_js_1.requireRule)(str(raw.roomId, 64), 'BAD_MESSAGE', '房间标识无效。');
+    if (raw.type === 'presence') {
+        (0, model_js_1.requireRule)(typeof raw.visible === 'boolean', 'BAD_MESSAGE', '在线状态无效。');
+        return { protocol: types_js_1.PROTOCOL, type: 'presence', roomId: raw.roomId, visible: raw.visible };
+    }
     if (raw.type === 'hello') {
         (0, model_js_1.requireRule)(str(raw.token, 64) && /^[a-f0-9]{32}$/.test(raw.token) && str(raw.name, 64), 'BAD_MESSAGE', '加入凭证或昵称无效。');
         return { protocol: types_js_1.PROTOCOL, type: 'hello', roomId: raw.roomId, token: raw.token, name: raw.name };
@@ -2951,6 +2982,7 @@ class Controller {
     release = null;
     interval = null;
     reconnectTimer = null;
+    visibilityOff = null;
     stopSubscription = null;
     invite = null;
     closed = false;
@@ -3013,6 +3045,24 @@ class Controller {
         }, 250);
     }
     watchPeer(peer) {
+        this.visibilityOff?.();
+        const onVisibility = () => {
+            if (document.visibilityState !== 'visible' || this.closed)
+                return;
+            if (!peer.destroyed && peer.disconnected) {
+                try {
+                    peer.reconnect();
+                }
+                catch { /* the normal retry path will surface the error */ }
+            }
+            // A mobile browser can suspend the data-channel timer while the
+            // signaling socket survives. Re-run the normal guest retry path
+            // as soon as the page is visible again.
+            if (this.client && !this.client.connected && !this.connecting)
+                this.syncGuest();
+        };
+        document.addEventListener('visibilitychange', onVisibility);
+        this.visibilityOff = () => document.removeEventListener('visibilitychange', onVisibility);
         peer.on('disconnected', () => {
             this.patch({ signalWarning: '信令连接暂时断开。已建立的数据通道可继续，新加入与重连可能受影响。' });
             setTimeout(() => { if (!this.closed && !peer.destroyed && peer.disconnected)
@@ -3273,6 +3323,8 @@ class Controller {
         this.client.detach();
         this.peer?.destroy();
         this.peer = null;
+        this.visibilityOff?.();
+        this.visibilityOff = null;
         await this.reconnectGuest();
         this.rememberInvitationURL();
     }
@@ -3338,6 +3390,8 @@ class Controller {
         this.client = null;
         this.peer?.destroy();
         this.peer = null;
+        this.visibilityOff?.();
+        this.visibilityOff = null;
         // Close-triggered pause transactions finish before releasing our explicit write lock.
         await this.authority?.flush();
         this.authority = null;
