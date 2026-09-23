@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>骑自行车的珠颈斑鸠 - Spotted Dove Cycling</title>
+  <style>
+    :root {
+      --bg-sky: #e9f5fa;
+      --road-color: #8395a7;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      min-height: 100vh;
+      background: radial-gradient(circle at 50% 30%, #f4fbff 0%, #d8ecf8 100%);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #2c3e50;
+      overflow-x: hidden;
+    }
+    .container {
+      width: 100%;
+      max-width: 1040px;
+      background: #ffffff;
+      border-radius: 28px;
+      box-shadow: 0 20px 50px rgba(50, 75, 110, 0.12), 0 4px 12px rgba(0,0,0,0.04);
+      padding: 30px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      position: relative;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 28px;
+      font-weight: 800;
+      color: #34495e;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+    .badge {
+      font-size: 13px;
+      background: #fdf2e9;
+      color: #d35400;
+      padding: 4px 12px;
+      border-radius: 20px;
+      border: 1px solid #f5cba7;
+      font-weight: 600;
+    }
+    .subtitle {
+      font-size: 14px;
+      color: #7f8c8d;
+      margin-top: 6px;
+    }
+    .canvas-wrapper {
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      max-height: 580px;
+      background: linear-gradient(180deg, #dcf0fb 0%, #ebf7fd 65%, #f6fcff 100%);
+      border-radius: 20px;
+      overflow: hidden;
+      position: relative;
+      border: 2px solid #e1eff7;
+      box-shadow: inset 0 2px 8px rgba(0,0,0,0.03);
+    }
+    svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      margin-top: 24px;
+      padding: 16px 24px;
+      background: #f8fafc;
+      border-radius: 16px;
+      border: 1px solid #edf2f7;
+      gap: 16px;
+    }
+    .status-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      font-size: 13px;
+      color: #576574;
+    }
+    .tag {
+      background: #fff;
+      padding: 6px 14px;
+      border-radius: 8px;
+      border: 1px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      display: inline-block;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+    }
+    .btn-group {
+      display: flex;
+      gap: 12px;
+    }
+    button {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 10px rgba(59, 130, 246, 0.25);
+    }
+    button:hover {
+      background: #2563eb;
+      transform: translateY(-1px);
+    }
+    button:active {
+      transform: translateY(1px);
+    }
+    button.secondary {
+      background: #ffffff;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+    }
+    button.secondary:hover {
+      background: #f1f5f9;
+      color: #1e293b;
+    }
+
+    /* SVG 关键动画 */
+    @keyframes wheelRotate {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes pedalRotate {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes roadMove {
+      from { stroke-dashoffset: 0; }
+      to { stroke-dashoffset: -120; }
+    }
+    @keyframes cloudMove {
+      from { transform: translateX(0); }
+      to { transform: translateX(-400px); }
+    }
+    @keyframes treeMove {
+      from { transform: translateX(0); }
+      to { transform: translateX(-900px); }
+    }
+    @keyframes birdBobbing {
+      0%, 100% { transform: translateY(0) rotate(0deg); }
+      25% { transform: translateY(-4px) rotate(-0.8deg); }
+      50% { transform: translateY(1px) rotate(0.4deg); }
+      75% { transform: translateY(-3px) rotate(-0.5deg); }
+    }
+    @keyframes headPeck {
+      0%, 100% { transform: translate(0, 0) rotate(0deg); }
+      20% { transform: translate(5px, 2px) rotate(2deg); } /* 斑鸠前伸探头 */
+      40% { transform: translate(-2px, -1px) rotate(-1deg); }
+      60% { transform: translate(3px, 1px) rotate(1deg); }
+      80% { transform: translate(-1px, 0px) rotate(0deg); }
+    }
+    @keyframes tailWag {
+      0%, 100% { transform: rotate(0deg); }
+      50% { transform: rotate(4deg); }
+    }
+    @keyframes cooBubble {
+      0% { opacity: 0; transform: translate(0, 0) scale(0.6); }
+      20% { opacity: 1; transform: translate(15px, -15px) scale(1); }
+      80% { opacity: 0.9; transform: translate(45px, -45px) scale(1.05); }
+      100% { opacity: 0; transform: translate(65px, -65px) scale(1.1); }
+    }
+    @keyframes stickJiggle {
+      0%, 100% { transform: rotate(0deg); }
+      50% { transform: rotate(-5deg); }
+    }
+
+    .anim-wheel {
+      animation: wheelRotate 1.2s linear infinite;
+      transform-origin: center;
+    }
+    .anim-pedal-sys {
+      animation: pedalRotate 1.2s linear infinite;
+    }
+    .anim-road {
+      animation: roadMove 0.6s linear infinite;
+    }
+    .anim-clouds {
+      animation: cloudMove 20s linear infinite;
+    }
+    .anim-scenery {
+      animation: treeMove 5s linear infinite;
+    }
+    .anim-bird-body {
+      animation: birdBobbing 0.6s ease-in-out infinite;
+      transform-origin: 430px 320px;
+    }
+    .anim-dove-head {
+      animation: headPeck 1.2s ease-in-out infinite;
+      transform-origin: 520px 200px;
+    }
+    .anim-tail {
+      animation: tailWag 0.6s ease-in-out infinite;
+      transform-origin: 360px 290px;
+    }
+    .anim-stick {
+      animation: stickJiggle 0.4s ease-in-out infinite;
+      transform-origin: 670px 245px;
+    }
+    .anim-bubble-1 {
+      animation: cooBubble 3s ease-out infinite;
+      transform-origin: 590px 170px;
+    }
+    .anim-bubble-2 {
+      animation: cooBubble 3s ease-out infinite 1.5s;
+      transform-origin: 590px 170px;
+    }
+
+    /* 暂停状态 */
+    .paused * {
+      animation-play-state: paused !important;
+    }
+
+    .details-card {
+      margin-top: 24px;
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+    .info-box {
+      background: #fdfefe;
+      border: 1px solid #edf2f7;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .info-box h3 {
+      font-size: 15px;
+      margin-bottom: 8px;
+      color: #2c3e50;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .info-box p {
+      font-size: 13px;
+      color: #64748b;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>
+        <span>🕊️🚲 骑自行车的珠颈斑鸠</span>
+        <span class="badge">Streptopelia chinensis</span>
+      </h1>
+      <p class="subtitle">用原生 SVG 精心绘制的治愈系矢量插画 · 标志性珍珠颈斑与极简树枝狂飙</p>
+    </header>
+
+    <div class="canvas-wrapper" id="canvasWrapper">
+      <svg viewBox="0 0 1000 620" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <!-- 渐变定义 -->
+          <linearGradient id="skyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#bfe3f7"/>
+            <stop offset="60%" stop-color="#def0fa"/>
+            <stop offset="100%" stop-color="#f4fbfe"/>
+          </linearGradient>
+
+          <linearGradient id="roadGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#576574"/>
+            <stop offset="10%" stop-color="#47535e"/>
+            <stop offset="100%" stop-color="#2c343a"/>
+          </linearGradient>
+
+          <!-- 斑鸠羽色渐变 -->
+          <!-- 头部粉葡灰 -->
+          <linearGradient id="doveHeadGrad" x1="20%" y1="0%" x2="80%" y2="100%">
+            <stop offset="0%" stop-color="#d4c2c5"/>
+            <stop offset="50%" stop-color="#c1abb0"/>
+            <stop offset="100%" stop-color="#aa949a"/>
+          </linearGradient>
+
+          <!-- 胸脯暖灰粉 -->
+          <linearGradient id="doveBreastGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#e8d5d8"/>
+            <stop offset="45%" stop-color="#d9bfc4"/>
+            <stop offset="80%" stop-color="#c4a5ab"/>
+            <stop offset="100%" stop-color="#ab8b91"/>
+          </linearGradient>
+
+          <!-- 背部及翼羽深灰褐 -->
+          <linearGradient id="doveWingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#8a7364"/>
+            <stop offset="50%" stop-color="#6e594a"/>
+            <stop offset="100%" stop-color="#544337"/>
+          </linearGradient>
+
+          <!-- 初级飞羽 -->
+          <linearGradient id="doveFlightFeathers" x1="0%" y1="0%" x2="100%" y2="50%">
+            <stop offset="0%" stop-color="#564539"/>
+            <stop offset="100%" stop-color="#3c2f26"/>
+          </linearGradient>
+
+          <!-- 自行车漆色：复古薄荷绿 -->
+          <linearGradient id="bikeFrameGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#48bb78"/>
+            <stop offset="50%" stop-color="#2f855a"/>
+            <stop offset="100%" stop-color="#22543d"/>
+          </linearGradient>
+
+          <!-- 金属电镀银 -->
+          <linearGradient id="chromeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#e2e8f0"/>
+            <stop offset="40%" stop-color="#ffffff"/>
+            <stop offset="70%" stop-color="#cbd5e1"/>
+            <stop offset="100%" stop-color="#94a3b8"/>
+          </linearGradient>
+
+          <!-- 复古皮座垫 -->
+          <linearGradient id="leatherGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#8d5b36"/>
+            <stop offset="60%" stop-color="#6a3f1d"/>
+            <stop offset="100%" stop-color="#4a2a12"/>
+          </linearGradient>
+
+          <!-- 轮胎阴影与质感 -->
+          <radialGradient id="tireGrad" cx="50%" cy="50%" r="50%">
+            <stop offset="75%" stop-color="#1e272e"/>
+            <stop offset="90%" stop-color="#2f3542"/>
+            <stop offset="100%" stop-color="#14181d"/>
+          </radialGradient>
+
+          <!-- 鸟眼球渐变：金红虹膜 -->
+          <radialGradient id="doveIrisGrad" cx="40%" cy="35%" r="60%">
+            <stop offset="0%" stop-color="#ffb142"/>
+            <stop offset="60%" stop-color="#cc5200"/>
+            <stop offset="100%" stop-color="#842000"/>
+          </radialGradient>
+
+          <!-- 滤镜：轻微投影 -->
+          <filter id="softShadow" x="-10%" y="-10%" width="120%" height="120%">
+            <feDropShadow dx="0" dy="4" stdDeviation="6" flood-opacity="0.18"/>
+          </filter>
+        </defs>
+
+        <!-- 背景：天空与远景云层 -->
+        <rect x="0" y="0" width="1000" height="490" fill="url(#skyGrad)" />
+
+        <!-- 远景：漂浮的白云 -->
+        <g class="anim-clouds" opacity="0.75">
+          <!-- 云朵1 -->
+          <g transform="translate(150, 60)">
+            <ellipse cx="60" cy="30" rx="45" ry="20" fill="#ffffff" />
+            <ellipse cx="90" cy="20" rx="35" ry="25" fill="#ffffff" />
+            <ellipse cx="120" cy="30" rx="35" ry="18" fill="#ffffff" />
+          </g>
+          <!-- 云朵2 -->
+          <g transform="translate(560, 45)">
+            <ellipse cx="50" cy="25" rx="40" ry="18" fill="#ffffff" />
+            <ellipse cx="80" cy="18" rx="30" ry="22" fill="#ffffff" />
+            <ellipse cx="110" cy="25" rx="32" ry="16" fill="#ffffff" />
+          </g>
+          <!-- 云朵3 -->
+          <g transform="translate(920, 70)">
+            <ellipse cx="40" cy="20" rx="35" ry="16" fill="#ffffff" />
+            <ellipse cx="70" cy="15" rx="28" ry="18" fill="#ffffff" />
+          </g>
+          <!-- 延伸云朵保证循环平滑 -->
+          <g transform="translate(1350, 55)">
+            <ellipse cx="60" cy="30" rx="45" ry="20" fill="#ffffff" />
+            <ellipse cx="90" cy="20" rx="35" ry="25" fill="#ffffff" />
+          </g>
+        </g>
+
+        <!-- 远景山峦树影 -->
+        <path d="M 0,460 Q 120,400 280,450 T 600,430 T 900,440 T 1200,430 L 1000,490 L 0,490 Z" fill="#c3e0df" opacity="0.6"/>
+        <path d="M 0,470 Q 200,430 450,465 T 800,450 T 1100,460 L 1000,490 L 0,490 Z" fill="#a5d3c8" opacity="0.65"/>
+
+        <!-- 快速后退的路旁绿化灌木丛 -->
+        <g class="anim-scenery">
+          <g transform="translate(100, 430)">
+            <circle cx="0" cy="0" r="28" fill="#78b087" opacity="0.8"/>
+            <circle cx="20" cy="-10" r="34" fill="#589b6b" opacity="0.9"/>
+            <circle cx="45" cy="5" r="25" fill="#468858" opacity="0.8"/>
+          </g>
+          <g transform="translate(450, 425)">
+            <circle cx="0" cy="0" r="30" fill="#78b087" opacity="0.75"/>
+            <circle cx="25" cy="-12" r="36" fill="#589b6b" opacity="0.85"/>
+            <circle cx="50" cy="2" r="28" fill="#468858" opacity="0.8"/>
+          </g>
+          <g transform="translate(800, 435)">
+            <circle cx="0" cy="0" r="25" fill="#78b087" opacity="0.8"/>
+            <circle cx="22" cy="-8" r="30" fill="#589b6b" opacity="0.9"/>
+          </g>
+          <g transform="translate(1200, 430)">
+            <circle cx="0" cy="0" r="28" fill="#78b087" opacity="0.8"/>
+            <circle cx="20" cy="-10" r="34" fill="#589b6b" opacity="0.9"/>
+          </g>
+        </g>
+
+        <!-- 道路与路缘 -->
+        <rect x="0" y="475" width="1000" height="20" fill="#88c399"/>
+        <line x1="0" y1="495" x2="1000" y2="495" stroke="#71a982" stroke-width="3"/>
+
+        <!-- 柏油路面 -->
+        <rect x="0" y="495" width="1000" height="125" fill="url(#roadGrad)"/>
+
+        <!-- 飞驰的路面白虚线 -->
+        <line x1="-100" y1="565" x2="1100" y2="565" stroke="#ffffff" stroke-width="8" stroke-dasharray="45 35" stroke-linecap="round" class="anim-road" opacity="0.85"/>
+        <line x1="0" y1="502" x2="1000" y2="502" stroke="#b2bec3" stroke-width="2" opacity="0.5"/>
+
+        <!-- 自行车与斑鸠在地面上的投影 -->
+        <g id="groundShadows" opacity="0.32">
+          <ellipse cx="280" cy="572" rx="70" ry="12" fill="#1e272e"/>
+          <ellipse cx="680" cy="572" rx="70" ry="12" fill="#1e272e"/>
+          <ellipse cx="480" cy="574" rx="140" ry="16" fill="#1e272e"/>
+        </g>
+
+        <!-- ==================== 自行车基础层（后轮与后传动） ==================== -->
+        <!-- 后轮轮组 (中心 280, 480, 半径 92) -->
+        <g id="rearWheel">
+          <circle cx="280" cy="480" r="92" fill="none" stroke="url(#tireGrad)" stroke-width="15"/>
+          <circle cx="280" cy="480" r="85" fill="none" stroke="#dfe6e9" stroke-width="1.5" opacity="0.5"/>
+          <circle cx="280" cy="480" r="83" fill="none" stroke="url(#chromeGrad)" stroke-width="5"/>
+
+          <!-- 旋转辐条群 -->
+          <g class="anim-wheel" style="transform-origin: 280px 480px;">
+            <line x1="280" y1="398" x2="280" y2="562" stroke="#cbd5e1" stroke-width="1.5" opacity="0.75"/>
+            <line x1="198" y1="480" x2="362" y2="480" stroke="#cbd5e1" stroke-width="1.5" opacity="0.75"/>
+            <line x1="222" y1="422" x2="338" y2="538" stroke="#cbd5e1" stroke-width="1.5" opacity="0.75"/>
+            <line x1="222" y1="538" x2="338" y2="422" stroke="#cbd5e1" stroke-width="1.5" opacity="0.75"/>
+            <line x1="205" y1="450" x2="355" y2="510" stroke="#cbd5e1" stroke-width="1.2" opacity="0.6"/>
+            <line x1="205" y1="510" x2="355" y2="450" stroke="#cbd5e1" stroke-width="1.2" opacity="0.6"/>
+            <line x1="250" y1="405" x2="310" y2="555" stroke="#cbd5e1" stroke-width="1.2" opacity="0.6"/>
+            <line x1="310" y1="405" x2="250" y2="555" stroke="#cbd5e1" stroke-width="1.2" opacity="0.6"/>
+            <rect x="278" y="405" width="4" height="12" fill="#e17055" rx="1.5"/>
+          </g>
+
+          <!-- 飞轮塔轮 -->
+          <circle cx="280" cy="480" r="18" fill="url(#chromeGrad)" stroke="#475569" stroke-width="2"/>
+          <circle cx="280" cy="480" r="10" fill="#334155"/>
+          <circle cx="280" cy="480" r="5" fill="#f8fafc"/>
+        </g>
+
+        <!-- 后泥板（经典复古弯拱） -->
+        <path d="M 190,470 A 96 96 0 0 1 350,395" fill="none" stroke="url(#bikeFrameGrad)" stroke-width="7" stroke-linecap="round"/>
+        <path d="M 280,480 L 198,472 M 280,480 L 225,415" stroke="#94a3b8" stroke-width="2.5"/>
+
+        <!-- 传动链条与链罩 -->
+        <line x1="280" y1="495" x2="470" y2="505" stroke="#475569" stroke-width="4" stroke-dasharray="5 3"/>
+        <line x1="280" y1="465" x2="470" y2="455" stroke="#475569" stroke-width="4" stroke-dasharray="5 3"/>
+        <!-- 复古半包链条防护罩 -->
+        <path d="M 470,450 L 320,460 A 24 24 0 0 0 320,500 L 470,510 A 30 30 0 0 0 470,450 Z" fill="#38a169" opacity="0.9" stroke="#22543d" stroke-width="2"/>
+
+        <!-- 自行车车架主体 -->
+        <!-- 后下叉 -->
+        <line x1="280" y1="480" x2="470" y2="480" stroke="url(#bikeFrameGrad)" stroke-width="8" stroke-linecap="round"/>
+        <!-- 后上叉 -->
+        <line x1="280" y1="480" x2="420" y2="320" stroke="url(#bikeFrameGrad)" stroke-width="8" stroke-linecap="round"/>
+        <!-- 立管 / 座管 -->
+        <line x1="470" y1="480" x2="415" y2="310" stroke="url(#bikeFrameGrad)" stroke-width="10" stroke-linecap="round"/>
+        <line x1="415" y1="310" x2="400" y2="265" stroke="url(#chromeGrad)" stroke-width="7" stroke-linecap="round"/>
+        <!-- 下管 -->
+        <line x1="470" y1="480" x2="630" y2="295" stroke="url(#bikeFrameGrad)" stroke-width="11" stroke-linecap="round"/>
+        <!-- 上管：优雅弯梁 -->
+        <path d="M 420,320 Q 520,360 630,290" fill="none" stroke="url(#bikeFrameGrad)" stroke-width="10" stroke-linecap="round"/>
+        <path d="M 420,340 Q 520,380 630,310" fill="none" stroke="url(#bikeFrameGrad)" stroke-width="6" stroke-linecap="round" opacity="0.8"/>
+
+        <!-- 复古皮革车座 -->
+        <g id="saddle" transform="translate(390, 245)">
+          <circle cx="2" cy="18" r="6" fill="none" stroke="url(#chromeGrad)" stroke-width="3"/>
+          <circle cx="15" cy="18" r="6" fill="none" stroke="url(#chromeGrad)" stroke-width="3"/>
+          <line x1="0" y1="12" x2="28" y2="12" stroke="#64748b" stroke-width="3"/>
+          <path d="M -8,10 C -12,2 0,-3 22,-2 C 38,-1 50,8 48,13 C 45,17 38,15 30,13 C 12,12 -2,15 -8,10 Z" fill="url(#leatherGrad)" stroke="#3e1f08" stroke-width="1.5" filter="url(#softShadow)"/>
+          <circle cx="-3" cy="7" r="1.5" fill="#f6e05e"/>
+          <circle cx="5" cy="6" r="1.5" fill="#f6e05e"/>
+          <circle cx="13" cy="6" r="1.5" fill="#f6e05e"/>
+        </g>
+
+        <!-- 牙盘五通大齿盘 (中心 470, 480) -->
+        <circle cx="470" cy="480" r="32" fill="url(#chromeGrad)" stroke="#475569" stroke-width="3"/>
+        <circle cx="470" cy="480" r="12" fill="#1e293b"/>
+        <circle cx="452" cy="480" r="5" fill="#475569"/>
+        <circle cx="488" cy="480" r="5" fill="#475569"/>
+        <circle cx="470" cy="462" r="5" fill="#475569"/>
+        <circle cx="470" cy="498" r="5" fill="#475569"/>
+
+        <!-- 后侧（远离观众）曲柄与脚踏板 -->
+        <g class="anim-pedal-sys" style="transform-origin: 470px 480px;">
+          <line x1="470" y1="480" x2="430" y2="430" stroke="#94a3b8" stroke-width="6" stroke-linecap="round"/>
+          <circle cx="430" cy="430" r="4" fill="#334155"/>
+          <g transform="translate(430, 430)">
+            <g style="animation: pedalRotate 1.2s linear infinite reverse; transform-origin: 0 0;">
+              <rect x="-14" y="-4" width="28" height="8" rx="2" fill="#334155" stroke="#64748b" stroke-width="1"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- 右爪（后脚）：踩在后脚踏上 -->
+        <g id="rightBirdFoot">
+          <path d="M 438,400 L 430,426" stroke="#f87171" stroke-width="4.5" stroke-linecap="round"/>
+          <path d="M 430,426 L 418,428 M 430,426 L 424,432" stroke="#ef4444" stroke-width="3" stroke-linecap="round"/>
+        </g>
+
+        <!-- ==================== 核心主角：珠颈斑鸠主体 ==================== -->
+        <g class="anim-bird-body">
+
+          <!-- 斑鸠尾巴 -->
+          <g id="doveTail" class="anim-tail">
+            <path d="M 360,305 C 310,340 230,375 180,395 C 190,402 215,405 245,390 C 295,365 350,325 375,310 Z" fill="#3f3229"/>
+            <path d="M 180,395 C 195,385 220,388 235,393 L 205,403 Z" fill="#ffffff"/>
+            <path d="M 370,295 C 330,330 250,365 200,380 C 220,387 250,382 280,368 C 325,340 370,305 385,295 Z" fill="#5c4a3e" stroke="#45362c" stroke-width="1"/>
+            <path d="M 200,380 C 215,372 235,373 248,378 L 222,387 Z" fill="#f8fafc"/>
+            <path d="M 380,285 C 345,315 270,348 225,360 C 245,365 275,358 310,342 C 345,322 385,295 395,285 Z" fill="#756152"/>
+          </g>
+
+          <!-- 斑鸠大腿与蓬松臀部羽毛 -->
+          <path d="M 375,265 C 350,280 355,315 390,325 C 420,335 440,320 445,295 C 445,275 410,255 375,265 Z" fill="#b99ca2"/>
+
+          <!-- 斑鸠丰满圆润的身体躯干（胸部至腹部） -->
+          <path d="M 400,260
+                   C 365,260 365,225 395,195
+                   C 430,160 480,170 515,200
+                   C 545,225 565,265 550,305
+                   C 530,345 470,355 425,335
+                   C 395,320 380,285 400,260 Z"
+                fill="url(#doveBreastGrad)" filter="url(#softShadow)"/>
+
+          <!-- 腹部柔和细腻的高光羽毛质感 -->
+          <path d="M 445,270 C 475,270 520,290 510,325 C 485,342 440,335 425,315 C 420,290 430,270 445,270 Z" fill="#eddde0" opacity="0.6"/>
+
+          <!-- 标志性【珠颈黑白珍珠斑块】（Neck Pearl Patch） -->
+          <g id="pearlNeckPatch">
+            <path d="M 445,178 C 420,185 412,215 420,240 C 430,252 452,248 460,235 C 468,220 472,192 445,178 Z" fill="#1b1c1e" stroke="#2d3136" stroke-width="1.5"/>
+
+            <!-- 规则排列的晶莹白斑珍珠点 -->
+            <circle cx="432" cy="195" r="2.2" fill="#ffffff"/>
+            <circle cx="440" cy="190" r="2.5" fill="#ffffff"/>
+            <circle cx="448" cy="186" r="2.2" fill="#ffffff"/>
+            <circle cx="426" cy="207" r="2.5" fill="#ffffff"/>
+            <circle cx="434" cy="203" r="2.8" fill="#ffffff"/>
+            <circle cx="443" cy="200" r="2.8" fill="#ffffff"/>
+            <circle cx="452" cy="196" r="2.5" fill="#ffffff"/>
+            <circle cx="423" cy="220" r="2.6" fill="#ffffff"/>
+            <circle cx="431" cy="216" r="2.8" fill="#ffffff"/>
+            <circle cx="440" cy="213" r="3.0" fill="#ffffff"/>
+            <circle cx="450" cy="209" r="2.8" fill="#ffffff"/>
+            <circle cx="458" cy="205" r="2.4" fill="#ffffff"/>
+            <circle cx="425" cy="232" r="2.5" fill="#ffffff"/>
+            <circle cx="434" cy="228" r="2.8" fill="#ffffff"/>
+            <circle cx="443" cy="225" r="2.8" fill="#ffffff"/>
+            <circle cx="453" cy="221" r="2.6" fill="#ffffff"/>
+            <circle cx="430" cy="240" r="2.0" fill="#ffffff"/>
+            <circle cx="438" cy="238" r="2.2" fill="#ffffff"/>
+            <circle cx="447" cy="235" r="2.2" fill="#ffffff"/>
+          </g>
+
+          <!-- 斑鸠丰满的大翅膀（左翼：向前舒展，翅尖搭在车把上） -->
+          <g id="doveLeftWing">
+            <path d="M 435,225 C 410,245 405,285 425,305 C 460,325 500,295 530,265 C 510,240 470,215 435,225 Z" fill="url(#doveWingGrad)"/>
+
+            <!-- 覆羽鳞纹斑 -->
+            <g stroke="#9c8473" stroke-width="1.8" fill="none" opacity="0.85">
+              <path d="M 430,250 Q 445,260 460,250 Q 475,260 490,250"/>
+              <path d="M 425,265 Q 440,275 455,265 Q 470,275 485,265 Q 500,275 515,263"/>
+              <path d="M 432,280 Q 450,290 468,280 Q 486,290 505,278"/>
+              <path d="M 445,295 Q 465,303 485,292"/>
+            </g>
+
+            <!-- 初级飞羽向把手延伸 -->
+            <path d="M 480,275
+                     C 515,270 540,255 558,245
+                     C 555,252 545,262 530,275
+                     C 515,288 475,310 460,305 Z" fill="url(#doveFlightFeathers)"/>
+            <path d="M 470,285
+                     C 505,280 535,265 554,250
+                     C 550,258 535,272 520,285
+                     C 500,302 460,318 450,312 Z" fill="#32261e"/>
+
+            <!-- 拟人化翅尖小羽爪轻搭车把 -->
+            <g transform="translate(545, 238)">
+              <rect x="-4" y="0" width="16" height="14" rx="5" fill="#5c4a3e" transform="rotate(-15)"/>
+              <path d="M 2,2 C 8,0 14,4 12,12 C 10,16 4,14 2,10 Z" fill="#756152"/>
+              <line x1="5" y1="3" x2="6" y2="12" stroke="#3c2e25" stroke-width="1.2"/>
+              <line x1="9" y1="4" x2="10" y2="13" stroke="#3c2e25" stroke-width="1.2"/>
+            </g>
+          </g>
+
+          <!-- 斑鸠颈部与头部（带点头动作） -->
+          <g id="doveHeadAndNeck" class="anim-dove-head">
+            <path d="M 465,160
+                     C 475,130 500,118 532,125
+                     C 558,130 575,145 580,168
+                     C 585,188 565,215 540,225
+                     C 510,230 480,210 465,185 Z"
+                  fill="url(#doveHeadGrad)"/>
+
+            <!-- 额顶淡青灰高光 -->
+            <path d="M 505,123 C 525,120 550,126 565,138 C 555,134 530,130 512,132 Z" fill="#e2dce0" opacity="0.8"/>
+
+            <!-- 呆萌小圆眼 -->
+            <g id="doveEye" transform="translate(546, 154)">
+              <circle cx="0" cy="0" r="9.5" fill="#e2a6af"/>
+              <circle cx="0" cy="0" r="7.5" fill="url(#doveIrisGrad)"/>
+              <circle cx="0.5" cy="0" r="4.2" fill="#111113"/>
+              <circle cx="-1.5" cy="-2" r="1.8" fill="#ffffff"/>
+              <circle cx="2" cy="2" r="0.9" fill="#ffffff" opacity="0.8"/>
+            </g>
+
+            <!-- 黑色细眼线 -->
+            <path d="M 578,166 L 556,155 M 536,153 L 528,152" stroke="#4a3f35" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+
+            <!-- 鸟喙 -->
+            <g id="doveBeak">
+              <path d="M 572,160 Q 600,168 615,172 Q 595,175 574,172 Z" fill="#3a3b3c" stroke="#222" stroke-width="1"/>
+              <path d="M 573,172 Q 595,174 610,173 Q 590,179 572,176 Z" fill="#4b4d4e"/>
+              <ellipse cx="580" cy="164" rx="4" ry="2" fill="#887c82"/>
+              <line x1="581" y1="165" x2="585" y2="166" stroke="#222" stroke-width="1"/>
+            </g>
+
+            <!-- 呆毛微风轻拂 -->
+            <path d="M 515,122 Q 508,105 498,98 Q 508,108 518,121" fill="#8d7780" stroke="#755f68" stroke-width="1.5"/>
+            <path d="M 522,123 Q 518,108 512,102 Q 520,111 524,122" fill="#8d7780" stroke="#755f68" stroke-width="1.2"/>
+          </g>
+
+          <!-- 近处左脚：踩在前下脚踏板上 -->
+          <g id="leftBirdLeg">
+            <path d="M 442,325 Q 460,355 470,390" stroke="#f87171" stroke-width="6" stroke-linecap="round"/>
+            <path d="M 470,390 L 498,460" stroke="#ef4444" stroke-width="5" stroke-linecap="round"/>
+            <g transform="translate(500, 462)">
+              <path d="M -2,0 L -12,-4" stroke="#dc2626" stroke-width="3" stroke-linecap="round"/>
+              <path d="M 0,0 L 14,-2 L 18,6" stroke="#dc2626" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+              <path d="M 0,2 L 16,3 L 19,10" stroke="#ef4444" stroke-width="3" stroke-linecap="round" fill="none"/>
+              <path d="M -1,3 L 12,6 L 15,12" stroke="#b91c1c" stroke-width="3" stroke-linecap="round" fill="none"/>
+            </g>
+          </g>
+        </g>
+        <!-- 主角斑鸠主体结束 -->
+
+        <!-- 前脚踏联动系统（近处左侧） -->
+        <g class="anim-pedal-sys" style="transform-origin: 470px 480px;">
+          <line x1="470" y1="480" x2="505" y2="530" stroke="url(#chromeGrad)" stroke-width="7" stroke-linecap="round"/>
+          <circle cx="505" cy="530" r="5" fill="#1e293b"/>
+          <g transform="translate(505, 530)">
+            <g style="animation: pedalRotate 1.2s linear infinite reverse; transform-origin: 0 0;">
+              <rect x="-16" y="-5" width="32" height="10" rx="3" fill="#1e293b" stroke="#475569" stroke-width="1.5"/>
+              <rect x="-12" y="-2" width="24" height="4" rx="1" fill="#facc15"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- ==================== 自行车前部组件（头管、车把、车筐、前轮） ==================== -->
+        <!-- 前叉与头管 -->
+        <line x1="630" y1="270" x2="630" y2="340" stroke="url(#bikeFrameGrad)" stroke-width="12" stroke-linecap="round"/>
+        <!-- 转向把立管 -->
+        <line x1="630" y1="275" x2="620" y2="225" stroke="url(#chromeGrad)" stroke-width="7" stroke-linecap="round"/>
+        <line x1="620" y1="225" x2="585" y2="232" stroke="url(#chromeGrad)" stroke-width="7" stroke-linecap="round"/>
+
+        <!-- 复古优雅弯车把 -->
+        <path d="M 585,232 Q 545,235 535,248" fill="none" stroke="url(#chromeGrad)" stroke-width="7" stroke-linecap="round"/>
+        <!-- 棕色车把套 -->
+        <rect x="532" y="240" width="18" height="10" rx="4" fill="url(#leatherGrad)" transform="rotate(-15 541 245)"/>
+
+        <!-- 前叉延伸至前轮轴 (680, 480) -->
+        <line x1="630" y1="330" x2="680" y2="480" stroke="url(#bikeFrameGrad)" stroke-width="9" stroke-linecap="round"/>
+
+        <!-- 前泥板 -->
+        <path d="M 610,430 A 96 96 0 0 1 760,435" fill="none" stroke="url(#bikeFrameGrad)" stroke-width="7" stroke-linecap="round"/>
+        <path d="M 680,480 L 620,442 M 680,480 L 748,448" stroke="#94a3b8" stroke-width="2.5"/>
+
+        <!-- 前轮轮组 (中心 680, 480, 半径 92) -->
+        <g id="frontWheel">
+          <circle cx="680" cy="480" r="92" fill="none" stroke="url(#tireGrad)" stroke-width="15"/>
+          <circle cx="680" cy="480" r="85" fill="none" stroke="#dfe6e9" stroke-width="1.5" opacity="0.5"/>
+          <circle cx="680" cy="480" r="83" fill="none" stroke="url(#chromeGrad)" stroke-width="5"/>
+
+          <g class="anim-wheel" style="transform-origin: 680px 480px;">
+            <line x1="680" y1="398" x2="680" y2="562" stroke="#cbd5e1" stroke-width="1.5" opacity="0.75"/>
+            <line x1="598" y1="480" x2="762" y2="480" stroke="#cbd5e1" stroke-width="1.5" opacity="0.75"/>
+            <line x1="622" y1="422" x2="738" y2="538" stroke="#cbd5e1" stroke-width="1.5" opacity="0.75"/>
+            <line x1="622" y1="538" x2="738" y2="422" stroke="#cbd5e1" stroke-width="1.5" opacity="0.75"/>
+            <line x1="605" y1="450" x2="755" y2="510" stroke="#cbd5e1" stroke-width="1.2" opacity="0.6"/>
+            <line x1="605" y1="510" x2="755" y2="450" stroke="#cbd5e1" stroke-width="1.2" opacity="0.6"/>
+            <line x1="650" y1="405" x2="710" y2="555" stroke="#cbd5e1" stroke-width="1.2" opacity="0.6"/>
+            <line x1="710" y1="405" x2="650" y2="555" stroke="#cbd5e1" stroke-width="1.2" opacity="0.6"/>
+            <rect x="678" y="405" width="4" height="12" fill="#e17055" rx="1.5"/>
+          </g>
+
+          <circle cx="680" cy="480" r="12" fill="url(#chromeGrad)" stroke="#475569" stroke-width="2"/>
+          <circle cx="680" cy="480" r="5" fill="#0f172a"/>
+        </g>
+
+        <!-- 复古黄铜大车灯 -->
+        <g id="headlight" transform="translate(635, 275)">
+          <path d="M 0,0 L 22,-8 C 30,-2 30,14 22,20 L 0,12 Z" fill="#f59e0b" stroke="#b45309" stroke-width="1.5"/>
+          <ellipse cx="23" cy="6" rx="4" ry="13" fill="#fef08a" stroke="#d97706" stroke-width="1.5"/>
+          <polygon points="27,6 240,-40 240,80" fill="#fef08a" opacity="0.22"/>
+        </g>
+
+        <!-- 车铃 -->
+        <g id="bell" transform="translate(585, 218)">
+          <circle cx="0" cy="0" r="7" fill="#fbbf24" stroke="#d97706" stroke-width="1.5"/>
+          <circle cx="0" cy="0" r="3" fill="#fef3c7"/>
+          <rect x="-6" y="5" width="4" height="6" fill="#78716c"/>
+        </g>
+
+        <!-- 前车筐与“糊弄学筑巢材料” -->
+        <g id="frontBasket">
+          <line x1="630" y1="290" x2="650" y2="330" stroke="#94a3b8" stroke-width="3"/>
+          <line x1="680" y1="480" x2="695" y2="330" stroke="#94a3b8" stroke-width="2.5"/>
+
+          <path d="M 640,250 L 735,245 L 720,315 L 650,318 Z" fill="#d97706" opacity="0.9" stroke="#92400e" stroke-width="2" rx="4"/>
+          <g stroke="#b45309" stroke-width="1.2" opacity="0.75">
+            <line x1="660" y1="248" x2="665" y2="317"/>
+            <line x1="685" y1="247" x2="685" y2="316"/>
+            <line x1="710" y1="246" x2="702" y2="315"/>
+            <line x1="645" y1="268" x2="728" y2="264"/>
+            <line x1="648" y1="288" x2="724" y2="285"/>
+            <line x1="650" y1="305" x2="720" y2="303"/>
+          </g>
+
+          <!-- 树枝与蛋 -->
+          <g id="nestSticks" class="anim-stick">
+            <line x1="630" y1="235" x2="710" y2="270" stroke="#78350f" stroke-width="4.5" stroke-linecap="round"/>
+            <line x1="655" y1="246" x2="662" y2="236" stroke="#78350f" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="645" y1="275" x2="738" y2="225" stroke="#92400e" stroke-width="4" stroke-linecap="round"/>
+            <line x1="705" y1="245" x2="715" y2="238" stroke="#92400e" stroke-width="2" stroke-linecap="round"/>
+            <path d="M 735,225 Q 748,220 745,232 Q 736,233 735,225 Z" fill="#22c55e"/>
+            <ellipse cx="682" cy="254" rx="8" ry="11" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5" transform="rotate(15 682 254)"/>
+            <ellipse cx="680" cy="250" rx="3" ry="5" fill="#f8fafc" opacity="0.8"/>
+          </g>
+        </g>
+
+        <!-- 呼啸而过的速度线 -->
+        <g stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.6" class="anim-road">
+          <line x1="820" y1="210" x2="760" y2="210"/>
+          <line x1="880" y1="260" x2="790" y2="260"/>
+          <line x1="840" y1="360" x2="770" y2="360"/>
+          <line x1="210" y1="280" x2="150" y2="280"/>
+          <line x1="180" y1="340" x2="100" y2="340"/>
+        </g>
+
+        <!-- 治愈的“咕咕咕”声音气泡 1 -->
+        <g class="anim-bubble-1" pointer-events="none">
+          <g transform="translate(610, 140)">
+            <rect x="0" y="0" width="76" height="34" rx="17" fill="#ffffff" filter="url(#softShadow)" stroke="#e2e8f0" stroke-width="1.5"/>
+            <polygon points="12,32 5,42 24,32" fill="#ffffff"/>
+            <text x="38" y="22" font-size="14" font-weight="700" fill="#e11d48" text-anchor="middle" font-family="system-ui, sans-serif">咕咕~🎶</text>
+          </g>
+        </g>
+
+        <!-- 治愈的“咕咕咕”声音气泡 2 -->
+        <g class="anim-bubble-2" pointer-events="none">
+          <g transform="translate(640, 105)">
+            <rect x="0" y="0" width="90" height="34" rx="17" fill="#ffffff" filter="url(#softShadow)" stroke="#e2e8f0" stroke-width="1.5"/>
+            <polygon points="15,32 8,42 26,32" fill="#ffffff"/>
+            <text x="45" y="22" font-size="13" font-weight="700" fill="#2563eb" text-anchor="middle" font-family="system-ui, sans-serif">出差筑巢!🌿</text>
+          </g>
+        </g>
+
+      </svg>
+    </div>
+
+    <!-- 控制面板 -->
+    <div class="controls">
+      <div class="status-tags">
+        <div class="tag">
+          <span class="dot"></span>
+          <span>状态：欢快蹬车中</span>
+        </div>
+        <div class="tag">
+          <span>🎯 载荷：2 根精选树枝 + 1 枚蛋</span>
+        </div>
+        <div class="tag">
+          <span>🕊️ 领斑：经典黑底珍珠白点</span>
+        </div>
+      </div>
+      <div class="btn-group">
+        <button id="toggleBtn" onclick="toggleRide()">
+          <span id="btnIcon">⏸️</span>
+          <span id="btnText">歇会儿脚</span>
+        </button>
+        <button class="secondary" onclick="speedUp(event)">
+          <span>⚡ 狂飙加速</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 知识卡片 -->
+    <div class="details-card">
+      <div class="info-box">
+        <h3>🔍 珍珠颈斑 (Spotted Neck)</h3>
+        <p>珠颈斑鸠（Spotted Dove）最独特的标志：成鸟颈侧至后颈密布黑底白点的“珍珠领”，在 SVG 中使用多层次高对比度圆点精准重现。</p>
+      </div>
+      <div class="info-box">
+        <h3>🚲 拟人化骑行力学</h3>
+        <p>翅羽尖端自然化作握把小手，双足粉红鸟爪牢牢扣在旋转脚踏上，配合斑鸠独特的“行走点头”习惯，设计了节律性探头与车轮连动。</p>
+      </div>
+      <div class="info-box">
+        <h3>🌿 “糊弄学”彩蛋</h3>
+        <p>前车筐里特意安放了两根标志性的极简枯树枝和一颗蛋，致敬互联网上珠颈斑鸠“两根树枝就是一个家”的著名随性筑巢梗。</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let isRiding = true;
+    let speedLevel = 1;
+    const canvas = document.getElementById('canvasWrapper');
+    const toggleBtn = document.getElementById('toggleBtn');
+    const btnIcon = document.getElementById('btnIcon');
+    const btnText = document.getElementById('btnText');
+
+    function toggleRide() {
+      isRiding = !isRiding;
+      if (isRiding) {
+        canvas.classList.remove('paused');
+        btnIcon.textContent = '⏸️';
+        btnText.textContent = '歇会儿脚';
+      } else {
+        canvas.classList.add('paused');
+        btnIcon.textContent = '▶️';
+        btnText.textContent = '继续骑行';
+      }
+    }
+
+    function speedUp(e) {
+      if (!isRiding) toggleRide();
+      speedLevel = (speedLevel % 3) + 1;
+      const speeds = {
+        1: { wheel: '1.2s', road: '0.6s', bob: '0.6s' },
+        2: { wheel: '0.7s', road: '0.35s', bob: '0.35s' },
+        3: { wheel: '0.35s', road: '0.18s', bob: '0.18s' }
+      };
+
+      const cur = speeds[speedLevel];
+      document.querySelectorAll('.anim-wheel, .anim-pedal-sys').forEach(el => {
+        el.style.animationDuration = cur.wheel;
+      });
+      document.querySelectorAll('.anim-road').forEach(el => {
+        el.style.animationDuration = cur.road;
+      });
+      document.querySelectorAll('.anim-bird-body, .anim-tail').forEach(el => {
+        el.style.animationDuration = cur.bob;
+      });
+
+      const titles = { 1: '⚡ 狂飙加速', 2: '🔥 极速飞驰', 3: '🌿 回归闲适' };
+      const btnSpan = e ? e.currentTarget.querySelector('span') : document.querySelector('button.secondary span');
+      if (btnSpan) btnSpan.textContent = titles[speedLevel];
+    }
+  </script>
+</body>
+</html>
