@@ -1,4 +1,4 @@
-name: Deploy game to GitHub Pages
+name: Deploy archived pages
 
 on:
   push:
@@ -9,39 +9,26 @@ permissions:
   contents: read
 
 concurrency:
-  group: game-pages
+  group: archive-pages
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-      - run: npm run verify
-      - run: npx playwright install --with-deps chromium
-      - run: npm run verify:gameplay
-      - run: npm run verify:production
-      - name: Save runtime evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gameplay-evidence
-          path: output/gameplay-checks/
-          retention-days: 7
+      - name: Assemble archived pages
+        run: |
+          mkdir -p _site
+          cp index.html hx.html spotted-dove-cycling.html _site/
+          cp -R public/. _site/
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: dist
+          path: _site
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
       pages: write
       id-token: write
