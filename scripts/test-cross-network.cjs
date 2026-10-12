@@ -107,6 +107,44 @@ async function publicEgress() {
     return { addressHash: null, addressScope: 'unavailable', errors };
 }
 
+async function createMicrophoneWave() {
+    const sampleRate = 48000, seconds = 8, samples = sampleRate * seconds;
+    const wav = Buffer.alloc(44 + samples * 2);
+    wav.write('RIFF', 0); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVE', 8);
+    wav.write('fmt ', 12); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20);
+    wav.writeUInt16LE(1, 22); wav.writeUInt32LE(sampleRate, 24); wav.writeUInt32LE(sampleRate * 2, 28);
+    wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+    wav.write('data', 36); wav.writeUInt32LE(samples * 2, 40);
+    let phase = 0, squareSum = 0, peak = 0;
+    for (let i = 0; i < samples; i++) {
+        const t = i / sampleRate;
+        // Voiced, syllable-like harmonic bursts vary in pitch and loudness so
+        // this is not the stationary pure tone commonly suppressed as noise.
+        const frequency = (role === 'host' ? 175 : 213)
+            + 34 * Math.sin(2 * Math.PI * 0.73 * t) + 17 * Math.sin(2 * Math.PI * 1.91 * t);
+        phase += 2 * Math.PI * frequency / sampleRate;
+        const syllable = 0.22 + 0.78 * Math.pow(0.5 + 0.5 * Math.sin(2 * Math.PI * 3.4 * t), 0.7);
+        const inflection = 0.65 + 0.35 * Math.sin(2 * Math.PI * 0.41 * t) ** 2;
+        const fade = Math.min(1, t / 0.04, (seconds - t) / 0.04);
+        const carrier = (Math.sin(phase) + 0.55 * Math.sin(2 * phase)
+            + 0.3 * Math.sin(3 * phase) + 0.2 * Math.sin(5 * phase)) / 2.05;
+        const pcm = Math.round(32767 * 0.42 * syllable * inflection * fade * carrier);
+        wav.writeInt16LE(pcm, 44 + i * 2);
+        const value = pcm / 32768;
+        squareSum += value * value;
+        peak = Math.max(peak, Math.abs(value));
+    }
+    const rms = Math.sqrt(squareSum / samples);
+    assert.ok(rms > 0.01 && peak < 0.9, 'microphone fixture must contain moderate nonzero PCM');
+    const file = path.join(output, `${role}-tone.wav`);
+    await fs.writeFile(file, wav);
+    result.audio.input = { kind: 'known-nonzero-file', file: `${role}-tone.wav`,
+        format: 'PCM16 little-endian', sampleRate, channels: 1, seconds,
+        loop: true, rms, peak, sha256: hash(wav),
+        description: 'Time-varying pitch and amplitude with voiced harmonics; read by Chromium fake microphone.' };
+    return file;
+}
+
 // Installed before the application's scripts. No ICE server, SDP, candidate,
 // timer or transport state is changed by this observer.
 function installRTCObserver() {
@@ -262,18 +300,39 @@ async function browserEvidence() {
                         state: d.state, messagesSent: d.messagesSent, messagesReceived: d.messagesReceived,
                         bytesSent: d.bytesSent, bytesReceived: d.bytesReceived,
                     })),
-                    audio: all.filter(x => ['inbound-rtp', 'outbound-rtp', 'remote-inbound-rtp'].includes(x.type)
+                    audio: all.filter(x => ['inbound-rtp', 'outbound-rtp', 'remote-inbound-rtp', 'media-source'].includes(x.type)
                         && (x.kind === 'audio' || x.mediaType === 'audio')).map(x => ({
                         direction: x.type, bytesSent: x.bytesSent, bytesReceived: x.bytesReceived,
                         packetsSent: x.packetsSent, packetsReceived: x.packetsReceived, packetsLost: x.packetsLost,
                         jitter: x.jitter, roundTripTime: x.roundTripTime,
-                        totalAudioEnergy: x.totalAudioEnergy, totalSamplesReceived: x.totalSamplesReceived,
+                        totalAudioEnergy: x.totalAudioEnergy, audioLevel: x.audioLevel,
+                        totalSamplesDuration: x.totalSamplesDuration, totalSamplesReceived: x.totalSamplesReceived,
                         concealedSamples: x.concealedSamples,
                     })),
                 };
             } catch (error) { return { index, error: error.message, connectionState: pc.connectionState }; }
         }));
         const c = globalThis.testApp?.controller, s = c?.state;
+        const trackState = track => track ? { kind: track.kind, enabled: track.enabled,
+            muted: track.muted, readyState: track.readyState } : null;
+        const inputAnalysis = c ? [...c.voice.inputs.entries()].map(([seat, input]) => {
+            const values = new Float32Array(input.analyser.fftSize);
+            input.analyser.getFloatTimeDomainData(values);
+            const rms = Math.sqrt(values.reduce((sum, x) => sum + x * x, 0) / values.length);
+            return { seat, self: seat === s.view?.self, rms, gain: input.gain.gain.value };
+        }) : [];
+        const boundSenders = c ? [...c.voice.endpoints.entries()].map(([seat, endpoint]) => {
+            const pc = endpoint.link.rtc, destinationTracks = endpoint.destination?.stream.getAudioTracks() || [];
+            return { seat, peerConnectionIndex: globalThis.crossNetworkPCs.indexOf(pc),
+                destinationTracks: destinationTracks.map(trackState),
+                transceivers: (pc?.getTransceivers() || []).filter(t =>
+                    t.sender.track?.kind === 'audio' || t.receiver.track?.kind === 'audio').map(t => ({
+                    direction: t.direction, currentDirection: t.currentDirection,
+                    senderTrack: trackState(t.sender.track), receiverTrack: trackState(t.receiver.track),
+                    senderIsDestinationTrack: destinationTracks.includes(t.sender.track),
+                })),
+            };
+        }) : [];
         return { at: Date.now(), trace: globalThis.crossNetworkTrace || [], connections,
             history: globalThis.crossNetworkHistory || [],
             app: s ? { mode: s.mode, connected: s.connected, pending: s.pending,
@@ -283,7 +342,10 @@ async function browserEvidence() {
                 members: s.view?.members.map(m => ({ seat: m.seat, online: m.online })) || [],
                 voice: { enabled: c.voice.state.enabled, mic: c.voice.state.mic,
                     openMic: c.voice.state.openMic, allowed: c.voice.state.allowed,
-                    peers: c.voice.state.peers, error: c.voice.state.error },
+                    peers: c.voice.state.peers, error: c.voice.state.error,
+                    audioContext: c.voice.context ? { state: c.voice.context.state, currentTime: c.voice.context.currentTime } : null,
+                    microphoneTracks: (c.voice.microphone?.getAudioTracks() || []).map(trackState),
+                    inputAnalysis, boundSenders },
             } : null,
         };
     });
@@ -385,10 +447,21 @@ function summarizeAudio(before, after) {
     const sent = total(after, 'outbound-rtp', 'bytesSent') - total(before, 'outbound-rtp', 'bytesSent');
     const received = total(after, 'inbound-rtp', 'bytesReceived') - total(before, 'inbound-rtp', 'bytesReceived');
     const energy = total(after, 'inbound-rtp', 'totalAudioEnergy') - total(before, 'inbound-rtp', 'totalAudioEnergy');
+    const hasEnergy = sample => sample?.connections.some(c => c.audio?.some(x =>
+        x.direction === 'inbound-rtp' && typeof x.totalAudioEnergy === 'number'));
+    const energyMeasured = !!hasEnergy(before) && !!hasEnergy(after);
+    const selfRms = sample => sample.app?.voice.inputAnalysis.find(x => x.self)?.rms ?? null;
+    const inputObservedNonZero = [selfRms(before), selfRms(after)].some(rms => rms !== null && rms > 0.00001);
+    const firstContext = before.app?.voice.audioContext, lastContext = after.app?.voice.audioContext;
+    const contextClockAdvanced = !!firstContext && !!lastContext && lastContext.currentTime > firstContext.currentTime;
     Object.assign(result.audio, { sampleDurationMs: after.at - before.at, sentBytesDelta: sent,
         receivedBytesDelta: received, receivedAudioEnergyDelta: energy,
-        bidirectionalRtp: sent > 0 && received > 0, decodedEnergyIncreased: energy > 0,
-        scope: 'Synthetic microphone RTP transport; human audibility is not measured.' });
+        receivedAudioEnergyMeasured: energyMeasured,
+        inputRmsBefore: selfRms(before), inputRmsAfter: selfRms(after), inputObservedNonZero,
+        contextClockAdvanced, bidirectionalRtp: sent > 0 && received > 0,
+        decodedEnergyIncreased: energyMeasured && energy > 0,
+        ok: inputObservedNonZero && contextClockAdvanced && sent > 0 && received > 0 && energyMeasured && energy > 0,
+        scope: 'Known nonzero WAV through normal microphone/UI; local input and received decoded energy checked separately from data ACKs. Human audibility is not measured.' });
 }
 
 async function run() {
@@ -417,9 +490,11 @@ globalThis.testLoad=load;
 load('main.js');`);
     checkpoint('launch deployed application with transport observer');
     const { chromium } = require('playwright');
+    const microphoneWave = await createMicrophoneWave();
     browser = await chromium.launch({ headless: true,
         ...(process.env.CHROMIUM_EXECUTABLE_PATH ? { executablePath: process.env.CHROMIUM_EXECUTABLE_PATH } : {}),
-        args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'],
+        args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+            `--use-file-for-fake-audio-capture=${microphoneWave}`, '--autoplay-policy=no-user-gesture-required'],
     });
     result.browser = browser.version();
     const context = await browser.newContext({ permissions: ['microphone'] });
