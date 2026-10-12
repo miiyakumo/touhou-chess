@@ -8,6 +8,7 @@ const path = require('node:path');
 const { once } = require('node:events');
 const { chromium } = require('playwright');
 const { WebSocketServer, WebSocket } = require('ws');
+const { APP_VERSION } = require('../src/room/types.js');
 
 const root = path.resolve(__dirname, '..');
 const clients = new Map();
@@ -130,7 +131,7 @@ load('main.js');`);
         let host, guest, observer, invite, hostId, seat;
         await step('generated standalone page boots without test globals', async () => {
             const page = await newPage('standalone', false);
-            assert.match(await page.locator('.help-badge').innerText(), /v0\.4\.1/);
+            assert.equal(await page.locator('.help-badge').innerText(), `v${APP_VERSION}`);
             assert.equal(await page.evaluate(() => typeof globalThis.testLoad), 'undefined');
             await page.context().close();
         });

@@ -383,7 +383,7 @@ test('authority host permissions, command allow-list, and ACK envelope binding r
     assert.equal(a.link.out.filter(m => m.type === 'error').at(-1).code, 'HOST_CHANGED');
     const intruder = await bind(e.host, 'intruder', HOST, 'HOST');
     assert.equal(intruder.c.seat, null); assert.equal(intruder.link.out.at(-1).code, 'HOST_TOKEN');
-    assert.equal(PROTOCOL, 'renleisha/3'); assert.equal(APP_VERSION, '0.4.1');
+    assert.equal(PROTOCOL, 'renleisha/3'); assert.equal(APP_VERSION, '0.4.2');
     const j = journal(), c = new ClientSession(ROOM, A, 'ALICE', j), link = new Link('fake-host');
     c.link = link; c.connected = true; c.epoch = 'epoch-1'; c.view = e.room.view(2);
     const result = c.submit({ kind: 'ready', value: true }); const cancelled = result.catch(error => error);

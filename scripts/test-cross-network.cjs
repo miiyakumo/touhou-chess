@@ -319,7 +319,20 @@ async function browserEvidence() {
             const values = new Float32Array(input.analyser.fftSize);
             input.analyser.getFloatTimeDomainData(values);
             const rms = Math.sqrt(values.reduce((sum, x) => sum + x * x, 0) / values.length);
-            return { seat, self: seat === s.view?.self, rms, gain: input.gain.gain.value };
+            const sourceStream = input.source.mediaStream;
+            const sourceTracks = sourceStream?.getAudioTracks() || [];
+            const endpoint = c.voice.endpoints.get(seat);
+            const receiverTracks = (endpoint?.link.rtc?.getReceivers() || [])
+                .map(receiver => receiver.track).filter(track => track.kind === 'audio');
+            return { seat, self: seat === s.view?.self, rms, gain: input.gain.gain.value,
+                sourceIsMicrophoneStream: !!sourceStream && sourceStream === c.voice.microphone,
+                sourceMatchesEndpointRemoteStream: !!sourceStream && !!endpoint
+                    && sourceStream === endpoint.link.remoteAudio,
+                sourceMatchesReceiverTracks: sourceTracks.length > 0
+                    && sourceTracks.every(track => receiverTracks.includes(track)),
+                sourceTrackCount: sourceTracks.length, receiverTrackCount: receiverTracks.length,
+                endpointPeerConnectionIndex: endpoint ? globalThis.crossNetworkPCs.indexOf(endpoint.link.rtc) : null,
+            };
         }) : [];
         const boundSenders = c ? [...c.voice.endpoints.entries()].map(([seat, endpoint]) => {
             const pc = endpoint.link.rtc, destinationTracks = endpoint.destination?.stream.getAudioTracks() || [];
@@ -454,14 +467,32 @@ function summarizeAudio(before, after) {
     const inputObservedNonZero = [selfRms(before), selfRms(after)].some(rms => rms !== null && rms > 0.00001);
     const firstContext = before.app?.voice.audioContext, lastContext = after.app?.voice.audioContext;
     const contextClockAdvanced = !!firstContext && !!lastContext && lastContext.currentTime > firstContext.currentTime;
+    const remoteInputs = sample => sample.app?.voice.inputAnalysis.filter(x => !x.self) || [];
+    const sourceVerified = input => !!input && input.sourceMatchesEndpointRemoteStream === true
+        && input.sourceMatchesReceiverTracks === true && input.sourceIsMicrophoneStream === false;
+    const remoteBefore = remoteInputs(before), remoteAfter = remoteInputs(after);
+    const receiverSamples = [...new Set([...remoteBefore, ...remoteAfter].map(x => x.seat))].map(seat => {
+        const first = remoteBefore.find(x => x.seat === seat), last = remoteAfter.find(x => x.seat === seat);
+        const verifiedRms = [first, last].filter(sourceVerified).map(x => x.rms);
+        const maxVerifiedRms = verifiedRms.length ? Math.max(...verifiedRms) : null;
+        return { seat, rmsBefore: first?.rms ?? null, rmsAfter: last?.rms ?? null,
+            sourceVerifiedBefore: sourceVerified(first), sourceVerifiedAfter: sourceVerified(last),
+            maxVerifiedRms, observedNonZero: maxVerifiedRms !== null && maxVerifiedRms > 0.00001 };
+    });
+    const receiverSamplesObservedNonZero = receiverSamples.length > 0 && receiverSamples.every(x => x.observedNonZero);
+    const energyBefore = hasEnergy(before) ? total(before, 'inbound-rtp', 'totalAudioEnergy') : null;
+    const energyAfter = hasEnergy(after) ? total(after, 'inbound-rtp', 'totalAudioEnergy') : null;
     Object.assign(result.audio, { sampleDurationMs: after.at - before.at, sentBytesDelta: sent,
         receivedBytesDelta: received, receivedAudioEnergyDelta: energy,
-        receivedAudioEnergyMeasured: energyMeasured,
+        receivedAudioEnergyMeasured: energyMeasured, receivedAudioEnergyBefore: energyBefore,
+        receivedAudioEnergyAfter: energyAfter,
         inputRmsBefore: selfRms(before), inputRmsAfter: selfRms(after), inputObservedNonZero,
         contextClockAdvanced, bidirectionalRtp: sent > 0 && received > 0,
         decodedEnergyIncreased: energyMeasured && energy > 0,
-        ok: inputObservedNonZero && contextClockAdvanced && sent > 0 && received > 0 && energyMeasured && energy > 0,
-        scope: 'Known nonzero WAV through normal microphone/UI; local input and received decoded energy checked separately from data ACKs. Human audibility is not measured.' });
+        receiverSamples, receiverSamplesObservedNonZero,
+        energyMetricZeroDespiteReceiverSamples: receiverSamplesObservedNonZero && energyAfter === 0,
+        ok: inputObservedNonZero && contextClockAdvanced && sent > 0 && received > 0 && receiverSamplesObservedNonZero,
+        scope: 'Known nonzero WAV through normal microphone/UI. Nonzero received WebAudio samples must belong to the remote endpoint stream and its RTCRtpReceiver tracks, not the local microphone. Inbound RTP totalAudioEnergy remains an independent diagnostic, including zero or missing values. Human audibility is not measured.' });
 }
 
 async function run() {
