@@ -112,6 +112,7 @@ async function publicEgress() {
 function installRTCObserver() {
     globalThis.crossNetworkPCs = [];
     globalThis.crossNetworkTrace = [];
+    globalThis.crossNetworkHistory = [];
     const Native = globalThis.RTCPeerConnection;
     const emit = value => {
         if (globalThis.crossNetworkTrace.length < 600)
@@ -123,9 +124,93 @@ function installRTCObserver() {
             const index = globalThis.crossNetworkPCs.push(this) - 1;
             const states = () => ({ index, gathering: this.iceGatheringState,
                 ice: this.iceConnectionState, connection: this.connectionState, signaling: this.signalingState });
+            const history = { index, createdAt: Date.now(), closedAt: null, beforeClose: null, snapshots: [] };
+            globalThis.crossNetworkHistory[index] = history;
+            const aliases = new Map();
+            const alias = id => {
+                if (!id) return null;
+                if (!aliases.has(id)) aliases.set(id, `stat-${aliases.size + 1}`);
+                return aliases.get(id);
+            };
+            const candidate = c => ({ id: alias(c.id), side: c.type,
+                candidateType: c.candidateType, address: c.address || c.ip, port: c.port,
+                protocol: c.protocol, networkType: c.networkType, tcpType: c.tcpType,
+                relayProtocol: c.relayProtocol, url: c.url,
+                relatedAddress: c.relatedAddress, relatedPort: c.relatedPort });
+            let timer = null, sampling = false;
+            const stopSampling = () => { if (timer !== null) clearInterval(timer); timer = null; };
+            const sample = async reason => {
+                if (history.snapshots.length >= 120) { stopSampling(); return; }
+                if (sampling) return;
+                if (this.connectionState === 'closed') {
+                    history.closedAt ??= Date.now();
+                    stopSampling();
+                    return;
+                }
+                sampling = true;
+                // Preserve the states at request time: the application may call
+                // close synchronously while this read-only getStats is pending.
+                const transportState = transport => transport ? {
+                    dtls: transport.state,
+                    ice: transport.iceTransport?.state,
+                    gathering: transport.iceTransport?.gatheringState,
+                    role: transport.iceTransport?.role,
+                } : null;
+                const snapshot = { at: Date.now(), reason, ...states(), pairs: [], candidates: [], transports: [],
+                    sctp: this.sctp ? { state: this.sctp.state, transport: transportState(this.sctp.transport) } : null,
+                    mediaTransports: this.getTransceivers().map(t => ({ mid: t.mid,
+                        sender: transportState(t.sender.transport), receiver: transportState(t.receiver.transport) })),
+                };
+                history.snapshots.push(snapshot);
+                try {
+                    const stats = await this.getStats();
+                    const all = [...stats.values()];
+                    const selected = new Set(all.filter(x => x.type === 'transport' && x.selectedCandidatePairId)
+                        .map(x => x.selectedCandidatePairId));
+                    snapshot.pairs = all.filter(x => x.type === 'candidate-pair').map(p => ({
+                        id: alias(p.id), localCandidateId: alias(p.localCandidateId), remoteCandidateId: alias(p.remoteCandidateId),
+                        state: p.state, nominated: p.nominated, selected: !!p.selected || selected.has(p.id),
+                        selectedByTransport: selected.has(p.id),
+                        requestsSent: p.requestsSent, requestsReceived: p.requestsReceived,
+                        responsesSent: p.responsesSent, responsesReceived: p.responsesReceived,
+                        bytesSent: p.bytesSent, bytesReceived: p.bytesReceived,
+                        currentRoundTripTime: p.currentRoundTripTime, totalRoundTripTime: p.totalRoundTripTime,
+                    }));
+                    snapshot.candidates = all.filter(x => ['local-candidate', 'remote-candidate'].includes(x.type)).map(candidate);
+                    snapshot.transports = all.filter(x => x.type === 'transport').map(t => ({
+                        id: alias(t.id), dtlsState: t.dtlsState, iceState: t.iceState, iceRole: t.iceRole,
+                        selectedCandidatePairId: alias(t.selectedCandidatePairId),
+                        selectedCandidatePairChanges: t.selectedCandidatePairChanges,
+                        bytesSent: t.bytesSent, bytesReceived: t.bytesReceived,
+                    }));
+                } catch (error) { snapshot.error = error.message; }
+                finally {
+                    snapshot.collectedAt = Date.now();
+                    snapshot.connectionAtCollection = this.connectionState;
+                    sampling = false;
+                    if (history.snapshots.length >= 120 || this.connectionState === 'closed') stopSampling();
+                }
+            };
+            // These are probe-only observation hooks. The native close happens
+            // synchronously, without waiting for stats or changing app timers.
+            const nativeClose = this.close.bind(this);
+            this.close = (...args) => {
+                history.beforeClose ??= { at: Date.now(), ...states(),
+                    latestSnapshotAt: history.snapshots.at(-1)?.at ?? null };
+                void sample('before-close');
+                try { return nativeClose(...args); }
+                finally {
+                    history.closedAt ??= Date.now();
+                    stopSampling();
+                    emit({ event: 'native-close', ...states() });
+                }
+            };
             emit({ event: 'created', ...states() });
             for (const event of ['icegatheringstatechange', 'iceconnectionstatechange', 'connectionstatechange', 'signalingstatechange'])
-                this.addEventListener(event, () => emit({ event, ...states() }));
+                this.addEventListener(event, () => {
+                    emit({ event, ...states() });
+                    void sample(event);
+                });
             this.addEventListener('icecandidate', event => {
                 const c = event.candidate;
                 emit({ event: 'icecandidate', index, candidate: c ? {
@@ -138,6 +223,8 @@ function installRTCObserver() {
                 event: 'icecandidateerror', index, address: event.address, port: event.port,
                 url: event.url, errorCode: event.errorCode, errorText: event.errorText,
             }));
+            timer = setInterval(() => { void sample('interval'); }, 750);
+            void sample('created');
         }
     };
 }
@@ -188,6 +275,7 @@ async function browserEvidence() {
         }));
         const c = globalThis.testApp?.controller, s = c?.state;
         return { at: Date.now(), trace: globalThis.crossNetworkTrace || [], connections,
+            history: globalThis.crossNetworkHistory || [],
             app: s ? { mode: s.mode, connected: s.connected, pending: s.pending,
                 clientPending: c.client?.pendingCount ?? null, error: s.error,
                 signalWarning: s.signalWarning, clientError: c.client?.error || '',
@@ -215,6 +303,12 @@ async function browserEvidence() {
             pair.remote = sanitizeCandidate(pair.remote);
         }
     }
+    for (const history of raw.history) {
+        for (const snapshot of history.snapshots) {
+            snapshot.candidates = snapshot.candidates.map(sanitizeCandidate);
+            if (snapshot.error) snapshot.error = safeText(snapshot.error);
+        }
+    }
     if (raw.app) {
         for (const key of ['error', 'signalWarning', 'clientError']) raw.app[key] = safeText(raw.app[key]);
         raw.app.voice.error = safeText(raw.app.voice.error);
@@ -225,6 +319,36 @@ async function browserEvidence() {
 async function waitForChat(marker, timeout) {
     await page.waitForFunction(text => globalThis.testApp?.controller.state.view?.chat.some(x => x.text === text),
         marker, { timeout });
+}
+async function waitForGuestHello(marker, timeout) {
+    const handle = await page.waitForFunction(text => {
+        const s = globalThis.testApp?.controller.state;
+        if (s?.view?.chat.some(x => x.text === text)) return { ok: true };
+        const pcs = globalThis.crossNetworkPCs || [];
+        // No candidate has arrived yet: keep the original host waiting budget.
+        // Once this probe's sole incoming connection is terminal and nobody has
+        // joined, waiting five minutes cannot add useful transport evidence.
+        if (pcs.length === 1 && !s?.view?.members.some(m => m.seat !== 1)
+            && ['failed', 'closed'].includes(pcs[0].connectionState)) {
+            return { ok: false, error: `Incoming peer ended before room handshake (${pcs[0].connectionState})` };
+        }
+        return false;
+    }, marker, { timeout, polling: 250 });
+    const state = await handle.jsonValue();
+    await handle.dispose();
+    if (!state.ok) throw Error(state.error);
+}
+async function waitForGuestJoin(timeout) {
+    const handle = await page.waitForFunction(() => {
+        const c = globalThis.testApp?.controller, s = c?.state;
+        if (s?.mode === 'guest' && c.client?.connected) return { ok: true };
+        if (s?.mode === 'home' && !s.busy && s.error)
+            return { ok: false, error: s.error };
+        return false;
+    }, null, { timeout, polling: 250 });
+    const state = await handle.jsonValue();
+    await handle.dispose();
+    if (!state.ok) throw Error(`Room join failed: ${safeText(state.error)}`);
 }
 async function sendChat(marker) {
     checkpoint('send ' + marker.split('-').at(-1));
@@ -354,7 +478,7 @@ load('main.js');`);
         await writeJson('host-ready.json', { ok: true, role, runId, readyAt: new Date().toISOString(),
             page: result.page, runner: result.runner, egress: result.egress, configuration: result.configuration });
         checkpoint('host ready; waiting for independently hosted guest');
-        await waitForChat(markers.guestHello, Math.max(1000, started + maxDuration - Date.now() - 35000));
+        await waitForGuestHello(markers.guestHello, Math.max(1000, started + maxDuration - Date.now() - 35000));
         result.checks.push({ check: 'guest joined and its first chat reached host view', ok: true });
         await sendChat(markers.hostHello);
         const before = await browserEvidence();
@@ -380,8 +504,7 @@ load('main.js');`);
         await page.fill('#nickname', '跨网测试玩家');
         await page.fill('#invite-input', invitation.invite);
         await page.click('#entry-form button[type=submit]');
-        await page.waitForFunction(() => testApp.controller.state.mode === 'guest' && testApp.controller.client?.connected,
-            null, { timeout: 90000 });
+        await waitForGuestJoin(90000);
         result.checks.push({ check: 'room handshake completed on remote host', ok: true });
         await sendChat(markers.guestHello);
         await waitForChat(markers.hostHello, 20000);
