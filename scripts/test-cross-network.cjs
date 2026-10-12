@@ -1,0 +1,442 @@
+'use strict';
+
+// Run the two roles on independent machines, with invitation.json transferred
+// out of band. This probe uses the deployed page, its public PeerServer and its
+// Google STUN configuration unchanged. It does not simulate signaling or NAT.
+// Only disposable test-room data and Chromium's synthetic microphone are used.
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+const net = require('node:net');
+const { createHash } = require('node:crypto');
+
+const role = process.argv[2];
+if (!['host', 'guest'].includes(role)) {
+    console.error('Usage: node scripts/test-cross-network.cjs host|guest');
+    process.exit(2);
+}
+const root = path.resolve(__dirname, '..');
+const output = path.join(root, 'output/cross-network');
+const target = process.env.RLS_TEST_URL || 'https://miiyakumo.github.io/touhou-chess/hx';
+const runId = process.env.RLS_TEST_RUN || 'manual';
+const started = Date.now();
+const maxDuration = role === 'host' ? 360000 : 140000;
+const hash = value => createHash('sha256').update(value).digest('hex');
+const markers = Object.fromEntries(['guestHello', 'hostHello', 'guestDone', 'hostDone', 'guestFinal']
+    .map(key => [key, `cross-net-${hash(runId).slice(0, 16)}-${key}`]));
+const result = {
+    ok: false, role, startedAt: new Date(started).toISOString(), runId,
+    runner: {
+        platform: process.platform, arch: process.arch, node: process.version,
+        osRelease: os.release(), hostnameHash: hash(os.hostname()),
+        runnerOS: process.env.RUNNER_OS || null, runnerArch: process.env.RUNNER_ARCH || null,
+        imageOS: process.env.ImageOS || null, imageVersion: process.env.ImageVersion || null,
+        workflowRun: process.env.GITHUB_RUN_ID || null, workflowAttempt: process.env.GITHUB_RUN_ATTEMPT || null,
+        workflowJob: process.env.GITHUB_JOB || null, commit: process.env.GITHUB_SHA || null,
+    },
+    page: { url: target }, checks: [], audio: { attempted: false },
+    signaling: [], pageErrors: [], requestFailures: [], transportSamples: [],
+};
+let browser, page, phase = 'initialization', stopping = false;
+const secrets = [];
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function safeText(value) {
+    let text = String(value || '');
+    for (const secret of secrets)
+        if (secret) text = text.split(secret).join('[redacted]');
+    return text.replace(/RLS4:[A-Za-z0-9_-]+/g, '[redacted-invitation]')
+        .replace(/([?&](?:token|id|key)=)[^&\s)]+/g, '$1[redacted]')
+        .replace(/\b[a-f0-9]{32}\b/gi, '[redacted-id]').slice(0, 1800);
+}
+function safeUrl(value) {
+    try { const u = new URL(value); return u.origin + u.pathname; }
+    catch { return '[invalid URL]'; }
+}
+function boundedPush(array, value, max = 300) {
+    if (array.length < max) array.push(value);
+}
+function addressInfo(value) {
+    if (!value) return { addressHash: null, addressScope: 'unavailable', addressFamily: 0 };
+    const address = String(value).toLowerCase();
+    const family = net.isIP(address);
+    let scope = 'unknown';
+    if (family === 4) {
+        const [a, b] = address.split('.').map(Number);
+        scope = a === 127 ? 'loopback'
+            : a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 ? 'private'
+            : a === 100 && b >= 64 && b <= 127 ? 'shared-cgnat'
+            : a === 169 && b === 254 ? 'link-local'
+            : a === 0 ? 'unspecified' : a >= 224 ? 'multicast-or-reserved' : 'public';
+    } else if (family === 6) {
+        scope = address === '::1' ? 'loopback' : address === '::' ? 'unspecified'
+            : /^(fc|fd)/.test(address) ? 'private'
+            : /^fe[89ab]/.test(address) ? 'link-local'
+            : /^ff/.test(address) ? 'multicast' : 'public';
+    } else if (address.endsWith('.local')) scope = 'mdns';
+    return { addressHash: hash(address), addressScope: scope, addressFamily: family };
+}
+function sanitizeCandidate(candidate) {
+    if (!candidate) return null;
+    const { address, relatedAddress, ...rest } = candidate;
+    return { ...rest, ...addressInfo(address), relatedAddress: addressInfo(relatedAddress) };
+}
+async function writeJson(name, value) {
+    await fs.mkdir(output, { recursive: true });
+    const temporary = path.join(output, name + '.tmp');
+    await fs.writeFile(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+    await fs.rename(temporary, path.join(output, name));
+}
+function checkpoint(name) {
+    if (stopping) throw Error('Probe deadline reached');
+    phase = name;
+    console.log(`CROSS_NETWORK_PROGRESS ${role} ${name}`);
+}
+async function publicEgress() {
+    const errors = [];
+    for (const url of ['https://api.ipify.org', 'https://checkip.amazonaws.com']) {
+        try {
+            const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+            assert.equal(response.ok, true, 'public IP endpoint returned an error');
+            const address = (await response.text()).trim();
+            assert.ok(net.isIP(address), 'public IP endpoint did not return an IP');
+            return { source: url, ...addressInfo(address), measuredAt: new Date().toISOString(), errors };
+        } catch (error) { errors.push({ source: url, error: safeText(error.message) }); }
+    }
+    return { addressHash: null, addressScope: 'unavailable', errors };
+}
+
+// Installed before the application's scripts. No ICE server, SDP, candidate,
+// timer or transport state is changed by this observer.
+function installRTCObserver() {
+    globalThis.crossNetworkPCs = [];
+    globalThis.crossNetworkTrace = [];
+    const Native = globalThis.RTCPeerConnection;
+    const emit = value => {
+        if (globalThis.crossNetworkTrace.length < 600)
+            globalThis.crossNetworkTrace.push({ at: Date.now(), ...value });
+    };
+    globalThis.RTCPeerConnection = class extends Native {
+        constructor(configuration) {
+            super(configuration);
+            const index = globalThis.crossNetworkPCs.push(this) - 1;
+            const states = () => ({ index, gathering: this.iceGatheringState,
+                ice: this.iceConnectionState, connection: this.connectionState, signaling: this.signalingState });
+            emit({ event: 'created', ...states() });
+            for (const event of ['icegatheringstatechange', 'iceconnectionstatechange', 'connectionstatechange', 'signalingstatechange'])
+                this.addEventListener(event, () => emit({ event, ...states() }));
+            this.addEventListener('icecandidate', event => {
+                const c = event.candidate;
+                emit({ event: 'icecandidate', index, candidate: c ? {
+                    candidateType: c.type, address: c.address, port: c.port,
+                    protocol: c.protocol, tcpType: c.tcpType,
+                    relatedAddress: c.relatedAddress, relatedPort: c.relatedPort,
+                } : null });
+            });
+            this.addEventListener('icecandidateerror', event => emit({
+                event: 'icecandidateerror', index, address: event.address, port: event.port,
+                url: event.url, errorCode: event.errorCode, errorText: event.errorText,
+            }));
+        }
+    };
+}
+
+async function browserEvidence() {
+    if (!page || page.isClosed()) return null;
+    const raw = await page.evaluate(async () => {
+        const candidate = c => c ? {
+            candidateType: c.candidateType, address: c.address || c.ip, port: c.port,
+            protocol: c.protocol, networkType: c.networkType, tcpType: c.tcpType,
+            relayProtocol: c.relayProtocol, url: c.url,
+            relatedAddress: c.relatedAddress, relatedPort: c.relatedPort,
+        } : null;
+        const connections = await Promise.all((globalThis.crossNetworkPCs || []).map(async (pc, index) => {
+            try {
+                const stats = await pc.getStats();
+                const all = [...stats.values()];
+                const ids = new Set(all.filter(x => x.type === 'transport' && x.selectedCandidatePairId)
+                    .map(x => x.selectedCandidatePairId));
+                const pairs = all.filter(x => x.type === 'candidate-pair' &&
+                    (ids.has(x.id) || x.selected || x.nominated && x.state === 'succeeded'));
+                return {
+                    index, connectionState: pc.connectionState, iceConnectionState: pc.iceConnectionState,
+                    iceGatheringState: pc.iceGatheringState, signalingState: pc.signalingState,
+                    iceServers: (pc.getConfiguration().iceServers || []).map(s => ({ urls: s.urls })),
+                    selectedPairs: pairs.map(p => ({ state: p.state, nominated: p.nominated,
+                        selectedByTransport: ids.has(p.id), currentRoundTripTime: p.currentRoundTripTime,
+                        totalRoundTripTime: p.totalRoundTripTime, bytesSent: p.bytesSent, bytesReceived: p.bytesReceived,
+                        requestsSent: p.requestsSent, responsesReceived: p.responsesReceived,
+                        local: candidate(stats.get(p.localCandidateId)), remote: candidate(stats.get(p.remoteCandidateId)),
+                    })),
+                    candidates: all.filter(x => ['local-candidate', 'remote-candidate'].includes(x.type))
+                        .map(c => ({ side: c.type, ...candidate(c) })),
+                    dataChannels: all.filter(x => x.type === 'data-channel').map(d => ({
+                        state: d.state, messagesSent: d.messagesSent, messagesReceived: d.messagesReceived,
+                        bytesSent: d.bytesSent, bytesReceived: d.bytesReceived,
+                    })),
+                    audio: all.filter(x => ['inbound-rtp', 'outbound-rtp', 'remote-inbound-rtp'].includes(x.type)
+                        && (x.kind === 'audio' || x.mediaType === 'audio')).map(x => ({
+                        direction: x.type, bytesSent: x.bytesSent, bytesReceived: x.bytesReceived,
+                        packetsSent: x.packetsSent, packetsReceived: x.packetsReceived, packetsLost: x.packetsLost,
+                        jitter: x.jitter, roundTripTime: x.roundTripTime,
+                        totalAudioEnergy: x.totalAudioEnergy, totalSamplesReceived: x.totalSamplesReceived,
+                        concealedSamples: x.concealedSamples,
+                    })),
+                };
+            } catch (error) { return { index, error: error.message, connectionState: pc.connectionState }; }
+        }));
+        const c = globalThis.testApp?.controller, s = c?.state;
+        return { at: Date.now(), trace: globalThis.crossNetworkTrace || [], connections,
+            app: s ? { mode: s.mode, connected: s.connected, pending: s.pending,
+                clientPending: c.client?.pendingCount ?? null, error: s.error,
+                signalWarning: s.signalWarning, clientError: c.client?.error || '',
+                signalConnected: !!c.peer && !c.peer.disconnected,
+                members: s.view?.members.map(m => ({ seat: m.seat, online: m.online })) || [],
+                voice: { enabled: c.voice.state.enabled, mic: c.voice.state.mic,
+                    openMic: c.voice.state.openMic, allowed: c.voice.state.allowed,
+                    peers: c.voice.state.peers, error: c.voice.state.error },
+            } : null,
+        };
+    });
+    for (const event of raw.trace) {
+        if ('candidate' in event) event.candidate = sanitizeCandidate(event.candidate);
+        if ('address' in event) {
+            Object.assign(event, addressInfo(event.address));
+            delete event.address;
+        }
+        if (event.errorText) event.errorText = safeText(event.errorText);
+    }
+    for (const connection of raw.connections) {
+        if (connection.error) connection.error = safeText(connection.error);
+        connection.candidates = connection.candidates?.map(sanitizeCandidate);
+        for (const pair of connection.selectedPairs || []) {
+            pair.local = sanitizeCandidate(pair.local);
+            pair.remote = sanitizeCandidate(pair.remote);
+        }
+    }
+    if (raw.app) {
+        for (const key of ['error', 'signalWarning', 'clientError']) raw.app[key] = safeText(raw.app[key]);
+        raw.app.voice.error = safeText(raw.app.voice.error);
+    }
+    return raw;
+}
+
+async function waitForChat(marker, timeout) {
+    await page.waitForFunction(text => globalThis.testApp?.controller.state.view?.chat.some(x => x.text === text),
+        marker, { timeout });
+}
+async function sendChat(marker) {
+    checkpoint('send ' + marker.split('-').at(-1));
+    await page.fill('#chat-input', marker);
+    await page.locator('#chat-form button[type=submit]').click();
+    await page.waitForFunction(text => {
+        const c = testApp.controller;
+        return c.state.connected && c.state.pending === 0 && (c.client?.pendingCount ?? 0) === 0
+            && testApp.chatDraft === '' && c.state.view?.chat.some(x => x.text === text);
+    }, marker, { timeout: 15000 });
+    result.checks.push({ check: 'chat persisted and acknowledged', marker: marker.split('-').at(-1), ok: true });
+}
+async function enableSyntheticAudio() {
+    result.audio.attempted = true;
+    checkpoint('enable synthetic microphone through UI');
+    try {
+        await page.locator('.voice-panel [data-action=voice-enable]').click({ timeout: 5000 });
+        await page.waitForFunction(() => testApp.controller.voice.state.enabled, null, { timeout: 5000 });
+        await page.locator('.voice-panel [data-action=voice-mic]').click({ timeout: 5000 });
+        await page.waitForFunction(() => testApp.controller.voice.state.mic || !!testApp.controller.voice.state.error,
+            null, { timeout: 7000 });
+        const mic = await page.evaluate(() => testApp.controller.voice.state.mic);
+        if (mic) await page.locator('.voice-panel [data-action=voice-toggle]').click({ timeout: 5000 });
+        result.audio.setup = await page.evaluate(() => {
+            const s = testApp.controller.voice.state;
+            return { enabled: s.enabled, mic: s.mic, openMic: s.openMic, allowed: s.allowed, error: s.error };
+        });
+        result.audio.setup.error = safeText(result.audio.setup.error);
+    } catch (error) { result.audio.setupError = safeText(error.message); }
+}
+function summarizeAudio(before, after) {
+    const total = (sample, direction, key) => (sample?.connections || []).reduce((sum, c) => sum +
+        (c.audio || []).filter(x => x.direction === direction).reduce((n, x) => n + (x[key] || 0), 0), 0);
+    const sent = total(after, 'outbound-rtp', 'bytesSent') - total(before, 'outbound-rtp', 'bytesSent');
+    const received = total(after, 'inbound-rtp', 'bytesReceived') - total(before, 'inbound-rtp', 'bytesReceived');
+    const energy = total(after, 'inbound-rtp', 'totalAudioEnergy') - total(before, 'inbound-rtp', 'totalAudioEnergy');
+    Object.assign(result.audio, { sampleDurationMs: after.at - before.at, sentBytesDelta: sent,
+        receivedBytesDelta: received, receivedAudioEnergyDelta: energy,
+        bidirectionalRtp: sent > 0 && received > 0, decodedEnergyIncreased: energy > 0,
+        scope: 'Synthetic microphone RTP transport; human audibility is not measured.' });
+}
+
+async function run() {
+    await fs.mkdir(output, { recursive: true });
+    checkpoint('fetch deployed page and public egress evidence');
+    const [deployed, local, egress] = await Promise.all([
+        fetch(target, { signal: AbortSignal.timeout(20000), cache: 'no-store' }).then(async response => ({
+            status: response.status, url: response.url, bytes: Buffer.from(await response.arrayBuffer()),
+        })),
+        fs.readFile(path.join(root, 'hx.html')),
+        publicEgress(),
+    ]);
+    result.egress = egress;
+    Object.assign(result.page, { status: deployed.status, finalUrl: safeUrl(deployed.url),
+        bytes: deployed.bytes.length, sha256: hash(deployed.bytes), repositorySha256: hash(local),
+        matchesRepository: deployed.bytes.equals(local) });
+    assert.equal(deployed.status, 200, 'deployed page must return HTTP 200');
+    assert.equal(result.page.matchesRepository, true, 'deployed page differs from checked-out hx.html');
+    const html = deployed.bytes.toString('utf8');
+    const entry = "load('main.js');";
+    assert.equal(html.split(entry).length, 2, 'exactly one application entry point is required');
+    const instrumented = html.replace(entry, `
+const OriginalApp=load('ui/app.js').App;
+load('ui/app.js').App=class extends OriginalApp {constructor(){super();globalThis.testApp=this;}};
+globalThis.testLoad=load;
+load('main.js');`);
+    checkpoint('launch deployed application with transport observer');
+    const { chromium } = require('playwright');
+    browser = await chromium.launch({ headless: true,
+        ...(process.env.CHROMIUM_EXECUTABLE_PATH ? { executablePath: process.env.CHROMIUM_EXECUTABLE_PATH } : {}),
+        args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'],
+    });
+    result.browser = browser.version();
+    const context = await browser.newContext({ permissions: ['microphone'] });
+    await context.addInitScript(installRTCObserver);
+    // Keep the actual HTTPS origin. Only the previously verified main document
+    // is instrumented; every other URL, including signaling, goes to the network.
+    await context.route(url => url.href === target || url.href === deployed.url, route =>
+        route.request().isNavigationRequest()
+            ? route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: instrumented })
+            : route.continue());
+    page = await context.newPage();
+    page.setDefaultTimeout(15000);
+    page.on('pageerror', error => boundedPush(result.pageErrors, safeText(error.message)));
+    page.on('requestfailed', request => boundedPush(result.requestFailures, {
+        url: safeUrl(request.url()), error: safeText(request.failure()?.errorText),
+    }));
+    page.on('websocket', ws => {
+        const url = safeUrl(ws.url());
+        boundedPush(result.signaling, { at: Date.now(), event: 'socket-created', url });
+        for (const event of ['framesent', 'framereceived']) ws.on(event, frame => {
+            let message;
+            try { message = JSON.parse(String(frame.payload)); } catch { return; }
+            boundedPush(result.signaling, { at: Date.now(), event, url,
+                type: typeof message.type === 'string' ? safeText(message.type) : 'unknown',
+                payloadType: typeof message.payload?.type === 'string' ? safeText(message.payload.type) : undefined });
+        });
+        ws.on('socketerror', error => boundedPush(result.signaling, { at: Date.now(), event: 'socket-error', url, error: safeText(error) }));
+        ws.on('close', () => boundedPush(result.signaling, { at: Date.now(), event: 'socket-closed', url }));
+    });
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForFunction(() => document.body.dataset.ready === 'true');
+    result.configuration = await page.evaluate(() => {
+        const s = testApp.controller.settings, types = testLoad('room/types.js');
+        return { version: types.APP_VERSION, protocol: types.PROTOCOL,
+            signal: { host: s.host ?? '0.peerjs.com', port: s.port ?? 443, path: s.path ?? '/',
+                secure: s.secure !== false, key: s.key ?? 'peerjs' },
+            iceServers: s.iceServers.map(x => ({ urls: x.urls })),
+        };
+    });
+    assert.deepEqual(result.configuration.signal, { host: '0.peerjs.com', port: 443, path: '/', secure: true, key: 'peerjs' });
+    assert.deepEqual(result.configuration.iceServers, [{ urls: 'stun:stun.l.google.com:19302' }]);
+    result.checks.push({ check: 'deployed bytes and unchanged public network defaults', ok: true });
+
+    if (role === 'host') {
+        checkpoint('create room through normal entry form');
+        await page.fill('#nickname', '跨网测试房主');
+        await page.selectOption('#game-size', '6');
+        await page.click('#entry-form button[type=submit]');
+        await page.waitForFunction(() => testApp.controller.state.mode === 'host' && testApp.controller.state.connected,
+            null, { timeout: 30000 });
+        const invite = await page.evaluate(() => testApp.controller.getInvite());
+        secrets.push(invite);
+        await enableSyntheticAudio();
+        await writeJson('invitation.json', { runId, invite, createdAt: new Date().toISOString(),
+            pageSha256: result.page.sha256, markers });
+        await writeJson('host-ready.json', { ok: true, role, runId, readyAt: new Date().toISOString(),
+            page: result.page, runner: result.runner, egress: result.egress, configuration: result.configuration });
+        checkpoint('host ready; waiting for independently hosted guest');
+        await waitForChat(markers.guestHello, Math.max(1000, started + maxDuration - Date.now() - 35000));
+        result.checks.push({ check: 'guest joined and its first chat reached host view', ok: true });
+        await sendChat(markers.hostHello);
+        const before = await browserEvidence();
+        result.transportSamples.push(before);
+        await waitForChat(markers.guestDone, 45000);
+        const after = await browserEvidence();
+        result.transportSamples.push(after);
+        summarizeAudio(before, after);
+        await sendChat(markers.hostDone);
+        await waitForChat(markers.guestFinal, 20000);
+        result.checks.push({ check: 'guest confirmed both host messages and completed its ACK checks', ok: true });
+        // Allow the final durable ACK to reach the guest before ending the host.
+        await delay(1500);
+    } else {
+        const invitation = JSON.parse(await fs.readFile(path.join(output, 'invitation.json'), 'utf8'));
+        assert.equal(invitation.runId, runId, 'invitation belongs to a different probe run');
+        assert.equal(invitation.pageSha256, result.page.sha256, 'host and guest deployed page hashes differ');
+        assert.deepEqual(invitation.markers, markers, 'host and guest marker sets differ');
+        assert.equal(typeof invitation.invite, 'string');
+        secrets.push(invitation.invite);
+        checkpoint('join remote host through normal entry form');
+        await page.click('[data-action=tab-join]');
+        await page.fill('#nickname', '跨网测试玩家');
+        await page.fill('#invite-input', invitation.invite);
+        await page.click('#entry-form button[type=submit]');
+        await page.waitForFunction(() => testApp.controller.state.mode === 'guest' && testApp.controller.client?.connected,
+            null, { timeout: 90000 });
+        result.checks.push({ check: 'room handshake completed on remote host', ok: true });
+        await sendChat(markers.guestHello);
+        await waitForChat(markers.hostHello, 20000);
+        result.checks.push({ check: 'host chat synchronized to guest view', ok: true });
+        await enableSyntheticAudio();
+        const before = await browserEvidence();
+        result.transportSamples.push(before);
+        await delay(3500);
+        const after = await browserEvidence();
+        result.transportSamples.push(after);
+        summarizeAudio(before, after);
+        await sendChat(markers.guestDone);
+        await waitForChat(markers.hostDone, 20000);
+        await sendChat(markers.guestFinal);
+        result.checks.push({ check: 'both directions synchronized and final guest command durably acknowledged', ok: true });
+    }
+    assert.ok(result.transportSamples.some(s => s?.connections.some(c => c.selectedPairs?.some(p =>
+        p.state === 'succeeded' && p.bytesSent > 0 && p.bytesReceived > 0))), 'no successful selected ICE pair with bidirectional traffic');
+    assert.equal(result.pageErrors.length, 0, 'uncaught page errors occurred');
+    result.ok = true;
+    checkpoint('data and application ACK verification complete');
+}
+
+(async () => {
+    let timer;
+    try {
+        await Promise.race([run(), new Promise((_, reject) => {
+            timer = setTimeout(() => reject(Error(`Probe exceeded ${maxDuration / 1000 - 12} seconds before cleanup`)), maxDuration - 12000);
+        })]);
+    } catch (error) {
+        stopping = true;
+        result.failure = { phase, error: safeText(error.message) };
+        console.error(`CROSS_NETWORK_FAILURE ${role} ${phase}: ${safeText(error.message)}`);
+    } finally {
+        clearTimeout(timer);
+        stopping = true;
+        try {
+            result.finalEvidence = await Promise.race([browserEvidence(), delay(5000).then(() => ({ error: 'diagnostics timeout' }))]);
+        } catch (error) { result.diagnosticsError = safeText(error.message); }
+        if (browser) {
+            try { await Promise.race([browser.close(), delay(5000)]); }
+            catch (error) { result.closeError = safeText(error.message); }
+        }
+        result.finishedAt = new Date().toISOString();
+        result.durationMs = Date.now() - started;
+        await writeJson(`${role}-result.json`, result);
+        // One machine-readable result line. No invitation, room identity, token,
+        // full SDP or raw candidate IP is included in logs or result JSON.
+        console.log('CROSS_NETWORK_RESULT ' + JSON.stringify(result));
+        process.exitCode = result.ok ? 0 : 1;
+    }
+})().catch(async error => {
+    result.ok = false;
+    result.failure = { phase: 'result finalization', error: safeText(error.message) };
+    try { await writeJson(`${role}-result.json`, result); } catch { /* stdout is the fallback artifact */ }
+    console.log('CROSS_NETWORK_RESULT ' + JSON.stringify(result));
+    process.exitCode = 1;
+});
