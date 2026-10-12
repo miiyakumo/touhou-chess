@@ -322,17 +322,114 @@ test('late audio.play cannot re-enable a closed VoiceRoom', async () => {
     assert.equal(voice.context, null);
 });
 
-function audioLink(env, id) {
+function audioLink(env, id, replace = async () => {}) {
     const closes = new Set(), audio = new Set();
+    const sender = { track: null, async replaceTrack(track) { await replace(track); this.track = track; } };
     return {
-        id, open: true, remoteAudio: env.stream(id),
-        rtc: { getTransceivers() { return [{ receiver: { track: { kind: 'audio' } }, sender: { async replaceTrack() {} } }]; } },
+        id, open: true, remoteAudio: env.stream(id), sender,
+        rtc: { getTransceivers() { return [{ receiver: { track: { kind: 'audio' } }, sender }]; } },
         onAudio(fn) { audio.add(fn); return () => audio.delete(fn); },
         onSpeaking() { return () => {}; },
         onClose(fn) { closes.add(fn); return () => closes.delete(fn); },
         captureCallbacks() { return { closes: [...closes], audio: [...audio] }; },
     };
 }
+
+test('restoring sound retries a rejected sender binding using the existing live mix', async t => {
+    const env = voiceFixture(), voice = env.voice, rejected = deferred(), attempts = [];
+    t.after(() => voice.close());
+    await voice.enable();
+    const link = audioLink(env, 'retry', track => {
+        attempts.push(track);
+        return attempts.length === 1 ? rejected.promise : Promise.resolve();
+    });
+    voice.bind(link, 2);
+    const destination = voice.endpoints.get(2).destination;
+    rejected.reject(Error('temporary sender failure'));
+    await tick();
+    assert.match(voice.state.error, /temporary sender failure/);
+    assert.equal(link.sender.track, null);
+
+    await voice.enable();
+    await tick();
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts[1], attempts[0], 'retry keeps the existing mixed audio track');
+    assert.equal(voice.endpoints.get(2).destination, destination);
+    assert.equal(link.sender.track, destination.stream.getAudioTracks()[0]);
+    assert.equal(link.sender.track.readyState, 'live');
+    assert.equal(voice.state.error, '');
+});
+
+test('repeated audio events and sound activation share one pending replacement and keep success bound', async t => {
+    const env = voiceFixture(), voice = env.voice, pending = deferred(), attempts = [];
+    t.after(() => voice.close());
+    await voice.enable();
+    const link = audioLink(env, 'pending', track => { attempts.push(track); return pending.promise; });
+    voice.bind(link, 2);
+    const callbacks = link.captureCallbacks();
+    for (let i = 0; i < 3; i++)
+        for (const audio of callbacks.audio) audio();
+    await Promise.all([voice.enable(), voice.enable()]);
+    assert.equal(attempts.length, 1, 'pending replacement must not run concurrently');
+
+    pending.resolve();
+    await tick();
+    assert.equal(link.sender.track, attempts[0]);
+    await voice.enable();
+    for (const audio of callbacks.audio) audio();
+    await tick();
+    assert.equal(attempts.length, 1, 'successful binding remains idempotent');
+});
+
+for (const action of ['remove', 'replace', 'close']) {
+    test(`late sender failure after ${action} cannot replace current voice feedback`, async t => {
+        const env = voiceFixture(), voice = env.voice, pending = deferred();
+        t.after(() => voice.close());
+        let notifications = 0;
+        voice.changed = () => { ++notifications; };
+        await voice.enable();
+        const old = audioLink(env, 'old', () => pending.promise);
+        voice.bind(old, 2);
+        const oldTrack = voice.endpoints.get(2).destination.stream.getAudioTracks()[0];
+        const replacement = audioLink(env, 'replacement');
+        if (action === 'replace') voice.bind(replacement, 2);
+        else if (action === 'remove') voice.remove(2);
+        else await voice.close();
+        await tick();
+        voice.state.error = 'current feedback';
+        const before = notifications;
+
+        pending.reject(Error('late old sender failure'));
+        await tick();
+        assert.equal(voice.state.error, 'current feedback');
+        assert.equal(notifications, before, 'stale rejection must not publish a change');
+        assert.equal(oldTrack.readyState, 'ended');
+        if (action === 'replace') {
+            assert.equal(voice.endpoints.get(2).link, replacement);
+            assert.equal(replacement.sender.track, voice.endpoints.get(2).destination.stream.getAudioTracks()[0]);
+            assert.equal(replacement.sender.track.readyState, 'live');
+        } else assert.equal(voice.endpoints.size, 0);
+    });
+}
+
+test('late remote playback failure cannot overwrite feedback after endpoint replacement or disposal', async t => {
+    for (const action of ['replace', 'close']) {
+        const env = voiceFixture(), voice = env.voice, playback = deferred();
+        t.after(() => voice.close());
+        await voice.enable();
+        env.playWith(() => playback.promise);
+        voice.bind(audioLink(env, 'old-playback'), 2);
+        if (action === 'replace') {
+            env.playWith(async () => {});
+            voice.bind(audioLink(env, 'new-playback'), 2);
+        } else await voice.close();
+        await tick();
+        voice.state.error = 'current playback feedback';
+        playback.reject(Error('late decoder failure'));
+        await tick();
+        assert.equal(voice.state.error, 'current playback feedback', action);
+    }
+});
 
 test('host voice policy gates both monitoring and forwarding with mix-minus-self routing', async t => {
     const env = voiceFixture(), voice = env.voice; t.after(() => voice.close());

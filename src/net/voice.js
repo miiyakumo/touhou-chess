@@ -48,7 +48,7 @@ class VoiceRoom {
             return;
         if (old)
             this.remove(seat);
-        const ep = { link, seat, destination: null, decoder: null, off: () => { } };
+        const ep = { link, seat, destination: null, trackBound: false, trackBinding: false, decoder: null, off: () => { } };
         this.endpoints.set(seat, ep);
         const offAudio = link.onAudio?.(() => { if (this.context)
             this.attach(ep); }) ?? (() => { });
@@ -208,11 +208,30 @@ class VoiceRoom {
     attach(ep) {
         if (this.disposed || !this.context || this.endpoints.get(ep.seat) !== ep)
             return;
-        if (!ep.destination) {
+        const current = () => !this.disposed && this.endpoints.get(ep.seat) === ep;
+        if (!ep.destination)
             ep.destination = this.context.createMediaStreamDestination();
+        // Creating the mix does not mean replaceTrack succeeded. Keep one
+        // attempt in flight, then let a later enable/attach retry a failed one.
+        if (!ep.trackBound && !ep.trackBinding) {
             const t = ep.link.rtc?.getTransceivers().find(t => t.receiver.track?.kind === 'audio');
-            if (t)
-                void t.sender.replaceTrack(ep.destination.stream.getAudioTracks()[0]).catch(e => { this.state.error = '音频通道接入失败：' + message(e); this.changed(); });
+            if (t) {
+                ep.trackBinding = true;
+                void (async () => {
+                    try {
+                        await t.sender.replaceTrack(ep.destination.stream.getAudioTracks()[0]);
+                        if (current())
+                            ep.trackBound = true;
+                    }
+                    catch (e) {
+                        if (current()) {
+                            this.state.error = '音频通道接入失败：' + message(e);
+                            this.changed();
+                        }
+                    }
+                    finally { ep.trackBinding = false; }
+                })();
+            }
         }
         if (ep.link.remoteAudio) {
             // Chromium remote WebRTC decoding may remain idle with only a WebAudio
@@ -226,7 +245,7 @@ class VoiceRoom {
             }
             if (ep.decoder.srcObject !== ep.link.remoteAudio)
                 ep.decoder.srcObject = ep.link.remoteAudio;
-            void ep.decoder.play().catch(e => { this.state.error = '远端声音尚未启用：' + message(e); this.changed(); });
+            void ep.decoder.play().catch(e => { if (current()) { this.state.error = '远端声音尚未启用：' + message(e); this.changed(); } });
             this.addInput(ep.seat, ep.link.remoteAudio);
         }
         this.rewire();
