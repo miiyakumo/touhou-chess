@@ -1,0 +1,138 @@
+name: Cross-network deployed multiplayer
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/cross-network.yml
+      - scripts/test-cross-network.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cross-network-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RLS_TEST_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+  RLS_TEST_URL: https://miiyakumo.github.io/touhou-chess/hx
+
+jobs:
+  host:
+    name: Public network host (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Start the host with the deployed page and its default network settings
+        shell: bash
+        run: |
+          mkdir -p output/cross-network
+          nohup node scripts/test-cross-network.cjs host > output/cross-network/host.log 2>&1 &
+          for attempt in {1..60}; do
+            if [ -f output/cross-network/host-ready.json ]; then
+              cat output/cross-network/host-ready.json
+              exit 0
+            fi
+            if [ -f output/cross-network/host-result.json ]; then
+              cat output/cross-network/host.log
+              exit 1
+            fi
+            sleep 2
+          done
+          cat output/cross-network/host.log
+          echo 'Host did not become ready within 120 seconds.'
+          exit 1
+      - name: Share this temporary test room with the independent guest runner
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-network-invitation-${{ github.run_attempt }}
+          path: output/cross-network/invitation.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Wait for actual cross-network traffic
+        shell: bash
+        run: |
+          for attempt in {1..195}; do
+            if [ -f output/cross-network/host-result.json ]; then
+              cat output/cross-network/host.log
+              node -e 'const r=require("./output/cross-network/host-result.json"); process.exit(r.ok ? 0 : 1)'
+              exit $?
+            fi
+            sleep 2
+          done
+          cat output/cross-network/host.log
+          echo 'The host did not finish its bounded cross-network probe.'
+          exit 1
+      - name: Preserve host evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-network-host-evidence-${{ github.run_attempt }}
+          path: |
+            output/cross-network/host-result.json
+            output/cross-network/host.log
+            output/cross-network/host-*.png
+          retention-days: 7
+          if-no-files-found: ignore
+
+  guest:
+    name: Independent public network guest (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - name: Obtain the temporary invitation while the host remains online
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p output/cross-network
+          for attempt in {1..72}; do
+            if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "cross-network-invitation-$GITHUB_RUN_ATTEMPT" --dir output/cross-network 2> output/cross-network/artifact-wait.log; then
+              test -s output/cross-network/invitation.json
+              exit 0
+            fi
+            if [ "$((attempt % 6))" -eq 0 ]; then
+              host_result=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --jq '.jobs[] | select(.name == "Public network host (Linux)") | .conclusion // empty')
+              if [ "$host_result" = failure ] || [ "$host_result" = cancelled ]; then
+                echo "The host job ended with $host_result before publishing an invitation."
+                exit 1
+              fi
+            fi
+            sleep 5
+          done
+          cat output/cross-network/artifact-wait.log
+          echo 'The host invitation was not published within six minutes.'
+          exit 1
+      - name: Join through public signaling and verify bidirectional traffic
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/test-cross-network.cjs guest | tee output/cross-network/guest.log
+      - name: Preserve guest evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-network-guest-evidence-${{ github.run_attempt }}
+          path: |
+            output/cross-network/guest-result.json
+            output/cross-network/guest.log
+            output/cross-network/guest-*.png
+          retention-days: 7
+          if-no-files-found: ignore
